@@ -1,0 +1,11 @@
+DADS/
+DroneAudioDataset/
+cache_dads/
+cache_hard/
+archive/cache_kaggle/
+*.pt
+*.wav
+*.png
+__pycache__/
+*.pyc
+evalx/*.npz

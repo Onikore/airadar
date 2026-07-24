@@ -1,0 +1,19 @@
+выброшено синтетических окон из train: 0
+train окон: 290191   val окон: 50898
+val: drone=24750 no_drone=26148
+полевая запись: 191 окон (дрон слышен всю запись)
+трудных негативов в train: 23790  (в eval отложено: 23817)
+параметров: 287k
+pos_weight: 1.09
+ep01 loss 0.3474  auc 0.9922  auc_hard 0.9936  FAR_hard@r90 0.0%  recall_поле 0.5%  <- saved
+ep02 loss 0.1557  auc 0.9907  auc_hard 0.9907  FAR_hard@r90 0.0%  recall_поле 5.2%
+ep03 loss 0.1292  auc 0.9928  auc_hard 0.9928  FAR_hard@r90 0.0%  recall_поле 2.6%
+ep04 loss 0.1181  auc 0.9959  auc_hard 0.9947  FAR_hard@r90 0.0%  recall_поле 6.8%  <- saved
+ep05 loss 0.1043  auc 0.9966  auc_hard 0.9955  FAR_hard@r90 0.0%  recall_поле 10.5%  <- saved
+ep06 loss 0.1011  auc 0.9973  auc_hard 0.9964  FAR_hard@r90 0.0%  recall_поле 7.3%  <- saved
+ep07 loss 0.0956  auc 0.9962  auc_hard 0.9949  FAR_hard@r90 0.0%  recall_поле 7.9%
+ep08 loss 0.0893  auc 0.9972  auc_hard 0.9962  FAR_hard@r90 0.0%  recall_поле 19.4%
+ep09 loss 0.0862  auc 0.9983  auc_hard 0.9973  FAR_hard@r90 0.0%  recall_поле 18.8%  <- saved
+ep10 loss 0.0807  auc 0.9987  auc_hard 0.9979  FAR_hard@r90 0.0%  recall_поле 22.0%  <- saved
+ep11 loss 0.0777  auc 0.9987  auc_hard 0.9979  FAR_hard@r90 0.0%  recall_поле 20.9%
+ep12 loss 0.0781  auc 0.9986  auc_hard 0.9978  FAR_hard@r90 0.0%  recall_поле 25.1%

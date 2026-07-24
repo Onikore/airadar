@@ -1,0 +1,7 @@
+выброшено синтетических окон из train: 8636
+train окон: 43362   val окон: 9074
+val: drone=1962 no_drone=7112
+параметров: 287k
+pos_weight: 17.43
+ep01 loss 1.3164  auc 0.5905  acc 0.6104  auc_real 0.4421  <- saved
+ep02 loss 1.2499  auc 0.8104  acc 0.7851  auc_real 0.6595  <- saved

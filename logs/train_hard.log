@@ -1,0 +1,14 @@
+выброшено синтетических окон из train: 0
+train окон: 290191   val окон: 50898
+val: drone=24750 no_drone=26148
+трудных негативов в train: 23790  (в eval отложено: 23817)
+параметров: 287k
+pos_weight: 1.09
+ep01 loss 0.3150  auc 0.9885  auc_hard 0.9891  FAR_hard@r90 0.5%  <- saved
+ep02 loss 0.1543  auc 0.9932  auc_hard 0.9936  FAR_hard@r90 0.0%  <- saved
+ep03 loss 0.1253  auc 0.9956  auc_hard 0.9950  FAR_hard@r90 0.0%  <- saved
+ep04 loss 0.1109  auc 0.9920  auc_hard 0.9918  FAR_hard@r90 0.1%
+ep05 loss 0.1059  auc 0.9955  auc_hard 0.9944  FAR_hard@r90 0.0%
+ep06 loss 0.0984  auc 0.9940  auc_hard 0.9933  FAR_hard@r90 0.2%
+ep07 loss 0.0897  auc 0.9963  auc_hard 0.9953  FAR_hard@r90 0.0%  <- saved
+ep08 loss 0.0866  auc 0.9980  auc_hard 0.9977  FAR_hard@r90 0.0%  <- saved

@@ -1,0 +1,18 @@
+train окон: 51998   val окон: 9074
+val: drone=1962 no_drone=7112
+параметров: 287k
+pos_weight: 3.73
+ep01 loss 1.0401  auc 0.8412  acc 0.6270  auc_real 0.7429  <- saved
+ep02 loss 0.7070  auc 0.9504  acc 0.2251  auc_real 0.8073  <- saved
+ep03 loss 0.6120  auc 0.9689  acc 0.2763  auc_real 0.8453  <- saved
+ep04 loss 0.5680  auc 0.9608  acc 0.9348  auc_real 0.8034
+ep05 loss 0.5585  auc 0.9685  acc 0.4961  auc_real 0.8419
+ep06 loss 0.5126  auc 0.9744  acc 0.5284  auc_real 0.8711  <- saved
+ep07 loss 0.4902  auc 0.9719  acc 0.9447  auc_real 0.8580
+ep08 loss 0.4697  auc 0.9732  acc 0.9634  auc_real 0.8642
+ep09 loss 0.4334  auc 0.9754  acc 0.9362  auc_real 0.8757  <- saved
+ep10 loss 0.4276  auc 0.9782  acc 0.8945  auc_real 0.8897  <- saved
+ep11 loss 0.4059  auc 0.9817  acc 0.9399  auc_real 0.9071  <- saved
+ep12 loss 0.4070  auc 0.9831  acc 0.9467  auc_real 0.9144  <- saved
+ep13 loss 0.3836  auc 0.9822  acc 0.9354  auc_real 0.9099
+ep14 loss 0.3774  auc 0.9840  acc 0.9359  auc_real 0.9189  <- saved

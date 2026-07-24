@@ -1,0 +1,11 @@
+выброшено синтетических окон из train: 0
+train окон: 290191   val окон: 50898
+val: drone=24750 no_drone=26148
+полевая запись drone_video.wav: 191 окон (дрон слышен всю запись)
+полевая запись drone_video2.wav: 155 окон (дрон слышен всю запись)
+трудных негативов в train: 23790  (в eval отложено: 23817)
+архитектура: DroneNetV2  параметров: 240k
+pos_weight: 1.09
+ep01 loss 0.4090  auc 0.9912  auc_hard 0.9939  FAR_hard@r90 0.1%  recall_поле 1.0% 0.0%  <- saved
+ep02 loss 0.1642  auc 0.9950  auc_hard 0.9944  FAR_hard@r90 0.0%  recall_поле 3.1% 0.0%  <- saved
+ep03 loss 0.1306  auc 0.9949  auc_hard 0.9944  FAR_hard@r90 0.0%  recall_поле 2.6% 0.0%  <- saved

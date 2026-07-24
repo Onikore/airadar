@@ -1,0 +1,20 @@
+выброшено синтетических окон из train: 0
+train окон: 290191   val окон: 50898
+val: drone=24750 no_drone=26148
+полевая запись drone_video.wav: 191 окон (дрон слышен всю запись)
+полевая запись drone_video2.wav: 155 окон (дрон слышен всю запись)
+трудных негативов в train: 23790  (в eval отложено: 23817)
+параметров: 287k
+pos_weight: 1.09
+ep01 loss 0.2918  auc 0.9898  auc_hard 0.9909  FAR_hard@r90 0.0%  recall_поле 8.9% 0.0%  <- saved
+ep02 loss 0.1446  auc 0.9962  auc_hard 0.9968  FAR_hard@r90 0.0%  recall_поле 5.8% 0.0%  <- saved
+ep03 loss 0.1157  auc 0.9950  auc_hard 0.9943  FAR_hard@r90 0.0%  recall_поле 15.2% 0.0%
+ep04 loss 0.1038  auc 0.9957  auc_hard 0.9935  FAR_hard@r90 0.0%  recall_поле 5.2% 0.6%
+ep05 loss 0.1018  auc 0.9968  auc_hard 0.9954  FAR_hard@r90 0.0%  recall_поле 9.9% 0.0%
+ep06 loss 0.0911  auc 0.9988  auc_hard 0.9977  FAR_hard@r90 0.0%  recall_поле 11.5% 1.9%  <- saved
+ep07 loss 0.0819  auc 0.9988  auc_hard 0.9978  FAR_hard@r90 0.0%  recall_поле 20.9% 1.3%  <- saved
+ep08 loss 0.0823  auc 0.9991  auc_hard 0.9987  FAR_hard@r90 0.0%  recall_поле 16.8% 0.6%  <- saved
+ep09 loss 0.0768  auc 0.9994  auc_hard 0.9988  FAR_hard@r90 0.0%  recall_поле 25.7% 1.3%  <- saved
+ep10 loss 0.0716  auc 0.9997  auc_hard 0.9994  FAR_hard@r90 0.0%  recall_поле 28.3% 1.3%  <- saved
+ep11 loss 0.0677  auc 0.9996  auc_hard 0.9992  FAR_hard@r90 0.0%  recall_поле 29.3% 1.3%
+ep12 loss 0.0698  auc 0.9996  auc_hard 0.9993  FAR_hard@r90 0.0%  recall_поле 29.3% 1.3%

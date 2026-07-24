@@ -1,0 +1,109 @@
+{
+  "all": {
+    "auc": 0.9983051279198594,
+    "n": 50898,
+    "operating_points": {
+      "0.001": {
+        "recall": 0.988,
+        "threshold": 0.9979776740074158
+      },
+      "0.01": {
+        "recall": 0.9890505050505051,
+        "threshold": 0.9249446392059326
+      },
+      "0.05": {
+        "recall": 0.9893333333333333,
+        "threshold": 0.3290441334247589
+      }
+    },
+    "balanced": {
+      "recall": 0.9885252525252525,
+      "far": 0.0011855591249808782,
+      "threshold": 0.9959024786949158
+    }
+  },
+  "real_only": {
+    "auc": 0.9983051279198594,
+    "n": 50898,
+    "operating_points": {
+      "0.001": {
+        "recall": 0.988,
+        "threshold": 0.9979776740074158
+      },
+      "0.01": {
+        "recall": 0.9890505050505051,
+        "threshold": 0.9249446392059326
+      },
+      "0.05": {
+        "recall": 0.9893333333333333,
+        "threshold": 0.3290441334247589
+      }
+    },
+    "balanced": {
+      "recall": 0.9885252525252525,
+      "far": 0.0011855591249808782,
+      "threshold": 0.9959024786949158
+    }
+  },
+  "synth_only": {},
+  "hard_negatives": {
+    "chainsaw": 0.15625,
+    "insects": 0.12903225806451613,
+    "airplane": 0.075,
+    "cow": 0.060810810810810814,
+    "church_bells": 0.05625,
+    "washing_machine": 0.05,
+    "toilet_flush": 0.04375,
+    "can_opening": 0.03278688524590164,
+    "drilling": 0.02903225806451613,
+    "helicopter": 0.025477707006369428,
+    "engine_idling": 0.02366565961732125,
+    "snoring": 0.018867924528301886,
+    "coughing": 0.017391304347826087,
+    "rain": 0.0125,
+    "sheep": 0.0125,
+    "street_music": 0.0105,
+    "jackhammer": 0.008947368421052631,
+    "door_knock": 0.008695652173913044,
+    "sneezing": 0.008620689655172414,
+    "car_horn": 0.008141112618724558,
+    "water_drops": 0.007142857142857143,
+    "cat": 0.0070921985815602835,
+    "dog": 0.007042253521126761,
+    "door_creaks": 0.006756756756756757,
+    "hen": 0.006535947712418301,
+    "clapping": 0.00641025641025641,
+    "crying_baby": 0.006329113924050633,
+    "hand_saw": 0.006329113924050633,
+    "train": 0.00625,
+    "wind": 0.00625,
+    "dog_bark": 0.005868544600938967,
+    "air_conditioner": 0.004,
+    "siren": 0.0025176233635448137,
+    "breathing": 0.0,
+    "brushing_teeth": 0.0,
+    "children_playing": 0.0,
+    "chirping_birds": 0.0,
+    "clock_alarm": 0.0,
+    "clock_tick": 0.0,
+    "crackling_fire": 0.0,
+    "crickets": 0.0,
+    "crow": 0.0,
+    "drinking": 0.0,
+    "engine": 0.0,
+    "fireworks": 0.0,
+    "footsteps": 0.0,
+    "frog": 0.0,
+    "glass_breaking": 0.0,
+    "gun_shot": 0.0,
+    "keyboard": 0.0,
+    "laughing": 0.0,
+    "mouse_click": 0.0,
+    "pig": 0.0,
+    "pouring_water": 0.0,
+    "rooster": 0.0,
+    "sea_waves": 0.0,
+    "thunderstorm": 0.0,
+    "vacuum_cleaner": 0.0
+  }
+}

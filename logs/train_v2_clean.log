@@ -9,3 +9,4 @@ pos_weight: 1.09
 ep01 loss 0.4090  auc 0.9912  auc_hard 0.9939  FAR_hard@r90 0.1%  recall_поле 1.0% 0.0%  <- saved
 ep02 loss 0.1642  auc 0.9950  auc_hard 0.9944  FAR_hard@r90 0.0%  recall_поле 3.1% 0.0%  <- saved
 ep03 loss 0.1306  auc 0.9949  auc_hard 0.9944  FAR_hard@r90 0.0%  recall_поле 2.6% 0.0%  <- saved
+ep04 loss 0.1120  auc 0.9954  auc_hard 0.9939  FAR_hard@r90 0.0%  recall_поле 4.2% 0.0%

@@ -18,7 +18,6 @@ CPU-only.
 
 import os
 import numpy as np
-from sklearn.model_selection import GroupShuffleSplit
 from sklearn.linear_model import LogisticRegression
 
 from diag_leak import dumb_features, load as load_dads
@@ -38,8 +37,11 @@ def load_hard():
 def main():
     Xd, yd, gd = load_dads()
     Xh, cat, hard = load_hard()
-    tr, va = next(GroupShuffleSplit(n_splits=1, test_size=0.15, random_state=0)
-                  .split(Xd, yd, gd))
+    # Тот же замороженный сплит, что при обучении — иначе "1. пересечение с
+    # train" проверяло бы утечку в разбиении, которого в обучении не существует,
+    # и результат ничего не говорил бы про реальную таблицу FAR.
+    from train import load_split
+    tr, va = np.flatnonzero(load_split() == 0), np.flatnonzero(load_split() == 1)
 
     # --- 1. пересечение по точному совпадению окон ---
     print("хеширую DADS train...", flush=True)

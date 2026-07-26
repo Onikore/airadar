@@ -12,18 +12,27 @@ diag_hard сравнивал их при одинаковом FAR на val DADS,
 """
 
 import os
+import sys
 import numpy as np
 import torch
-from sklearn.model_selection import GroupShuffleSplit
 from sklearn.linear_model import LogisticRegression
 
-from train import LogMel, DroneNet, DEV, ROOT
+from train import LogMel, DroneNet, DEV, ROOT, load_split
 from diag_leak import dumb_features, load as load_dads
 from diag_hard import load_hard
 from eval import predict
 
 RECALLS = [0.80, 0.90, 0.95, 0.98]
 rng = np.random.default_rng(0)
+
+
+def _ckpt_name():
+    """Имя файла чекпоинта в models/ — первый небиочный (не начинающийся с
+    '--') аргумент командной строки, иначе dronenet.pt по умолчанию."""
+    for a in sys.argv[1:]:
+        if not a.startswith("--"):
+            return a
+    return "dronenet.pt"
 
 
 def far_at_recall(p_drone, p_neg, recalls):
@@ -38,14 +47,18 @@ def far_at_recall(p_drone, p_neg, recalls):
 def main():
     Xd, yd, gd = load_dads()
     Xh, cat, hard = load_hard()
-    tr, va = next(GroupShuffleSplit(n_splits=1, test_size=0.15, random_state=0)
-                  .split(Xd, yd, gd))
-    tr, va = np.sort(tr), np.sort(va)
+    # Тот же замороженный сплит, что при обучении: иначе Xva могло бы содержать
+    # окна, которые для реальной модели были в train, и порог/сравнение
+    # оказались бы смещены в пользу обеих сторон сразу.
+    sp = load_split()
+    tr, va = np.flatnonzero(sp == 0), np.flatnonzero(sp == 1)
     ih = np.isin(cat, list(hard))
     Xva = np.ascontiguousarray(Xd[va])      # ~0.8 ГБ, читаем с диска один раз
 
     # ---- CNN ----
-    ckpt = torch.load(os.path.join(ROOT, "models", "dronenet.pt"), map_location=DEV, weights_only=False)
+    name = _ckpt_name()
+    print(f"чекпоинт: models/{name}")
+    ckpt = torch.load(os.path.join(ROOT, "models", name), map_location=DEV, weights_only=False)
     model = DroneNet().to(DEV)
     model.load_state_dict(ckpt["model"])
     model.eval()

@@ -405,6 +405,20 @@ python3 diag_leak.py && python3 diag_hard.py && python3 diag_compare.py
 
 RTX 4050 Laptop 6 ГБ, torch 2.12.0+cu130, драйвер 580.173.02, 15 ГБ RAM.
 
+### Машина без GPU
+
+Для чтения кода, правок и прогона `--selfcheck` карта не нужна: `DEV` в
+[train.py](train.py) сам падает на `cpu`. Полное колесо CUDA весит 2,5 ГБ и
+на такой машине бесполезно, поэтому ставится сборка под CPU:
+
+```bash
+pip install pyarrow huggingface_hub
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+Обучать так нельзя — только проверять код. Сам прогон идёт в Colab, см.
+раздел «Обучение в Colab» в [RUNBOOK.md](RUNBOOK.md).
+
 Кэш `cache_dads` (5.1 ГБ) в оперативную память целиком не помещается, поэтому
 читается через `np.memmap`; индексы батча сортируются ради локальности доступа.
 

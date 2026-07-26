@@ -189,6 +189,33 @@ def _empty_buf():
     return {c: {"w": [], "y": [], "group": [], "src": [], "cat": []} for c in CACHES}
 
 
+# Шардов между выгрузками на HF. HF ограничивает коммиты в репозиторий —
+# 128 в час, — а выгрузка каждого шарда по отдельности давала бы 4-5 коммитов
+# на шард, то есть около 300 на все 85. Лимит выбивало на 25-м шарде.
+# Каталог целиком уходит одним коммитом (upload_folder), поэтому чекпоинт
+# раз в 15 шардов стоит 3 коммита, а весь прогон — меньше двадцати.
+#
+# Цена укрупнения: при обрыве сессии теряются шарды, посчитанные после
+# последнего чекпоинта. Манифест пишется в том же чекпоинте, поэтому они
+# просто пересчитаются — рассинхронизации не будет.
+CHECKPOINT_EVERY = 15
+
+
+def _checkpoint(manifest, upload_parts):
+    """Выгружает накопленные части одним коммитом на кэш и обновляет манифест.
+
+    Порядок важен: сначала части, потом манифест. Манифест — обещание, что
+    перечисленные шарды лежат на HF; записанный раньше частей, он при обрыве
+    между двумя выгрузками заставил бы пропустить непосчитанное.
+    """
+    if upload_parts:
+        for cache in CACHES:
+            pd = os.path.join(PARTS, cache)
+            if os.path.isdir(pd) and os.listdir(pd):
+                hub.push(pd, f"parts/{cache}")
+    hub.write_json(manifest, "manifest.json")
+
+
 def collect(upload_parts=True, limit=None):
     """Считает недостающие шарды в parts/. Возвращает манифест."""
     manifest = hub.read_json("manifest.json") or {"done": []}
@@ -196,7 +223,11 @@ def collect(upload_parts=True, limit=None):
     if limit:
         todo = todo[:limit]
     print(f"шардов к обработке: {len(todo)}  (готово ранее: {len(manifest['done'])})")
+    if upload_parts:
+        print(f"выгрузка на HF раз в {CHECKPOINT_EVERY} шардов "
+              f"(лимит HF — 128 коммитов в час)")
 
+    pending = 0
     for n, (src, i, path) in enumerate(todo, 1):
         key = _key(src, i)
         buf = _empty_buf()
@@ -208,16 +239,20 @@ def collect(upload_parts=True, limit=None):
                 d["group"].append(rec.group)
                 d["src"].append(rec.src)
                 d["cat"].append(rec.cat or "")
-        for cache, k in _write_part(key, buf):
-            if upload_parts:
-                for ext in (".bin", ".npz"):
-                    hub.push(os.path.join(PARTS, cache, k + ext),
-                             f"parts/{cache}/{k}{ext}")
+        _write_part(key, buf)
         manifest["done"].append(key)
-        hub.write_json(manifest, "manifest.json")
+        pending += 1
         print(f"  [{n}/{len(todo)}] {S.NAMES[src]} шард {i}  "
               f"dads={len(buf['cache_dads']['y'])} hard={len(buf['cache_hard']['y'])}",
               flush=True)
+        if pending >= CHECKPOINT_EVERY:
+            _checkpoint(manifest, upload_parts)
+            pending = 0
+            print(f"      чекпоинт на HF: {len(manifest['done'])} шардов готово",
+                  flush=True)
+
+    if pending:
+        _checkpoint(manifest, upload_parts)
     return manifest
 
 
@@ -241,13 +276,17 @@ def assemble(upload=True, manifest=None):
     """
     if manifest is None:
         manifest = hub.read_json("manifest.json") or {"done": []}
+    remote_files = None
     for cache in CACHES:
         pd = os.path.join(PARTS, cache)
         keys = _local_parts(cache)
-        for k in sorted(set(manifest.get("done", [])) - keys):
+        need = sorted(set(manifest.get("done", [])) - keys)
+        if need and remote_files is None:
+            remote_files = hub.list_files()      # один запрос на всю сборку
+        for k in need:
             # Шард мог не дать частей в этот кэш (шарды DADS не дают cache_hard),
             # поэтому отсутствие на HF — норма, а не ошибка.
-            if hub.exists(f"parts/{cache}/{k}.npz"):
+            if f"parts/{cache}/{k}.npz" in remote_files:
                 os.makedirs(pd, exist_ok=True)
                 for ext in (".bin", ".npz"):
                     hub.pull(f"parts/{cache}/{k}{ext}", os.path.join(pd, k + ext))
@@ -373,6 +412,15 @@ def selfcheck():
     assert rest == shards_[1:], rest
     assert _todo({"done": [_key(s, i) for s, i, _ in shards_]}, shards_) == [], \
         "всё готово — считать нечего"
+
+    # --- бюджет коммитов HF: 128 в час. Чекпоинт стоит 3 коммита (два каталога
+    # частей плюс манифест), финальная сборка — ещё 2. Считаем на всех 85 шардах.
+    n_shards = sum(N for N in S.N_SHARDS.values())
+    assert n_shards == 85, n_shards
+    commits = (n_shards + CHECKPOINT_EVERY - 1) // CHECKPOINT_EVERY * 3 + 2
+    assert commits <= 100, (
+        f"{commits} коммитов при CHECKPOINT_EVERY={CHECKPOINT_EVERY} — "
+        f"лимит HF 128 в час, нужен запас на повторные запуски")
 
     # --- HARD не содержит категорий, которых нет ни в одном источнике
     known = {

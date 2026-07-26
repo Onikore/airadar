@@ -106,11 +106,24 @@ def check_access():
     return name
 
 
-def exists(remote):
+def list_files():
+    """Все файлы репозитория одним запросом.
+
+    Нужна затем, что exists() в цикле запрашивал бы список целиком на каждой
+    итерации: 85 запросов там, где хватает одного. У HF отдельный лимит на
+    вызовы api (1000 за 5 минут), и упереться в него на пустом месте глупо.
+    """
     try:
-        files = _api().list_repo_files(REPO, repo_type=REPO_TYPE)
+        return set(_api().list_repo_files(REPO, repo_type=REPO_TYPE))
     except Exception:
-        return False
+        return set()
+
+
+def exists(remote, files=None):
+    """files — заранее полученный список (см. list_files), чтобы не запрашивать
+    его повторно при множественных проверках."""
+    if files is None:
+        files = list_files()
     r = _norm(remote)
     return r in files or any(f.startswith(r + "/") for f in files)
 

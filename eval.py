@@ -10,13 +10,13 @@ Accuracy для этой задачи бесполезна: классы нес�
 """
 
 import os
+import sys
 import json
 import numpy as np
 import torch
-from sklearn.model_selection import GroupShuffleSplit
 from sklearn.metrics import roc_auc_score, roc_curve
 
-from train import LogMel, DroneNet, load_cache, DEV, ROOT
+from train import LogMel, DroneNet, load_cache, load_split, DEV, ROOT
 
 FAR_TARGETS = [0.001, 0.01, 0.05]      # доля ложных тревог на окно 0.5 с
 
@@ -99,9 +99,9 @@ def main():
     logmel = LogMel().to(DEV)
 
     X, y, groups, synth = load_cache()
-    _, va = next(GroupShuffleSplit(n_splits=1, test_size=0.15, random_state=0)
-                 .split(X, y, groups))
-    va = np.sort(va)
+    # Тот же замороженный сплит, что при обучении. Пересчёт здесь своим
+    # GroupShuffleSplit означал бы оценку на другом разбиении.
+    va = np.flatnonzero(load_split() == 1)
     Xva, yva, sva = np.ascontiguousarray(X[va]), y[va], synth[va]
 
     p = predict(model, logmel, Xva)
@@ -130,5 +130,33 @@ def main():
     print("\nсохранено: eval.json")
 
 
+def selfcheck():
+    """RUNBOOK перечислял eval.py в списке проверок, но selfcheck здесь никогда
+    не было — запуск просто шёл в main() и падал без кэша. Проверяем чистые
+    части: расчёт рабочих точек не требует ни данных, ни модели."""
+    # идеальный разделитель: recall 100% при нулевом FAR на любом пороге
+    y = np.r_[np.ones(100), np.zeros(100)]
+    p = np.r_[np.full(100, 0.9), np.full(100, 0.1)]
+    r = report("идеальный", y, p)
+    assert r["auc"] == 1.0
+    for far in FAR_TARGETS:
+        assert r["operating_points"][str(far)]["recall"] == 1.0
+    assert r["balanced"]["recall"] == 1.0 and r["balanced"]["far"] == 0.0
+
+    # случайный: AUC около 0.5, recall при малом FAR заметно ниже единицы
+    rng = np.random.default_rng(0)
+    p = rng.random(200)
+    r = report("случайный", y, p)
+    assert 0.35 < r["auc"] < 0.65, r["auc"]
+    assert r["operating_points"]["0.001"]["recall"] < 0.2
+
+    # один класс — отчёт не падает, а возвращает пустое
+    assert report("один класс", np.ones(10), rng.random(10)) == {}
+
+    # результат сериализуем в json (файл eval.json пишется им же)
+    json.dumps(r, ensure_ascii=False)
+    print("selfcheck ok")
+
+
 if __name__ == "__main__":
-    main()
+    selfcheck() if "--selfcheck" in sys.argv else main()

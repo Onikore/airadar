@@ -15,7 +15,6 @@
 
 import os
 import numpy as np
-from sklearn.model_selection import GroupShuffleSplit
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
@@ -62,8 +61,14 @@ def melmean(W, nb=48):
 
 def main():
     X, y, g = load()
-    tr, va = next(GroupShuffleSplit(n_splits=1, test_size=0.15, random_state=0).split(X, y, g))
-    print(f"групп всего: {len(np.unique(g))}  train: {len(np.unique(g[tr]))}  val: {len(np.unique(g[va]))}")
+    # Сплит берём тот же, на котором учимся. Со своим GroupShuffleSplit этот
+    # скрипт мерил бы утечку в разбиении, которого не существует в обучении, —
+    # то есть отвечал бы не на тот вопрос, ради которого заведён.
+    from train import load_split
+    sp = load_split()
+    tr, va = np.flatnonzero(sp == 0), np.flatnonzero(sp == 1)
+    print(f"групп всего: {len(np.unique(g))}  train: {len(np.unique(g[tr]))}  "
+          f"val: {len(np.unique(g[va]))}  (сплит замороженный, из meta.npz)")
 
     tr_s = np.sort(rng.choice(tr, min(N * 2, len(tr)), replace=False))
     va_s = np.sort(rng.choice(va, min(N * 2, len(va)), replace=False))

@@ -207,20 +207,30 @@ HARD_CATS = {
 
 
 def load_hard(train_frac=0.5):
-    """Трудные негативы (бензопила, ветер, двигатель) с делением пополам.
+    """Трудные негативы (бензопила, ветер, двигатель) с категориями.
 
-    Половина идёт в обучение, половина остаётся нетронутой для eval — иначе
-    таблица ложных срабатываний перестанет что-либо измерять. Делим внутри
-    каждой категории по порядку окон, а окна идут по файлам, так что срез
-    примерно совпадает с границей между записями.
+    Возвращает (X, cat, train_idx, val_idx) — форма прежняя, её ждут eval.py,
+    compare_models.py и evalx/field_ci.py.
+
+    Изменилось происхождение индексов. Раньше делили пополам по порядку окон
+    внутри категории; срез примерно совпадал с границей между записями, но
+    именно что примерно — окна одной записи могли попасть по разные стороны, и
+    тогда таблица ложных срабатываний мерила ложные на обучающих данных. Теперь
+    берём замороженный сплит по группам из meta.npz (см. prep_hf.py).
+
+    Аргумент train_frac сохранён для совместимости и игнорируется, когда в meta
+    есть split.
     """
     d = os.path.join(ROOT, "cache_hard")
     if not os.path.exists(os.path.join(d, "meta.npz")):
         return None, None, None, None
-    m = np.load(os.path.join(d, "meta.npz"))
+    m = np.load(os.path.join(d, "meta.npz"), allow_pickle=True)
     X = np.memmap(os.path.join(d, "windows.bin"), dtype=np.int16,
                   mode="r", shape=(int(m["n"]), int(m["win"])))
     cat = m["cat"]
+    if "split" in m.files:
+        s = m["split"]
+        return X, cat, np.flatnonzero(s == 0), np.flatnonzero(s == 1)
     tr, va = [], []
     for c in np.unique(cat):
         idx = np.flatnonzero(cat == c)
@@ -242,6 +252,45 @@ def load_cache(name="cache_dads"):
         X = np.load(os.path.join(d, "windows.npy"), mmap_mode="r")
     synth = m["synth"] if "synth" in m.files else np.zeros(len(X), bool)
     return X, m["y"].astype(np.float32), m["group"], synth
+
+
+def load_split(name="cache_dads"):
+    """Сплит берётся из meta.npz, куда его заморозил prep_hf.py.
+
+    0 = train, 1 = val, 2 = test. Пересчитывать его при каждом обучении, как
+    было раньше, нельзя: при четырёх источниках любое изменение порядка данных
+    молча переставит границу и сделает два прогона несравнимыми. Ровно на это
+    жалуется NEXT_STEPS.md, шаг 0.
+
+    Старые кэши от prep_dads.py поля split не имеют — для них остаётся прежнее
+    деление с тем же random_state, чтобы ранее полученные числа воспроизводились.
+    """
+    d = name if os.path.isdir(name) else os.path.join(ROOT, name)
+    m = np.load(os.path.join(d, "meta.npz"), allow_pickle=True)
+    if "split" in m.files:
+        return m["split"].astype(np.int8)
+    n = int(m["n"])
+    _, va = next(GroupShuffleSplit(n_splits=1, test_size=0.15, random_state=0)
+                 .split(np.arange(n), m["y"], m["group"]))
+    s = np.zeros(n, np.int8)
+    s[va] = 1
+    return s
+
+
+def load_hard_test():
+    """Удержанная часть трудных негативов — (X, cat).
+
+    Не вызывать до финальной проверки: всё, что попадает в отбор чекпоинта,
+    перестаёт быть честной метрикой. Ради этого она и отделена от load_hard.
+    """
+    d = os.path.join(ROOT, "cache_hard")
+    if not os.path.exists(os.path.join(d, "meta.npz")):
+        return None, None
+    m = np.load(os.path.join(d, "meta.npz"), allow_pickle=True)
+    X = np.memmap(os.path.join(d, "windows.bin"), dtype=np.int16,
+                  mode="r", shape=(int(m["n"]), int(m["win"])))
+    te = np.flatnonzero(load_split("cache_hard") == 2)
+    return X[te], m["cat"][te]
 
 
 def _probs(model, logmel, X, bs=512):
@@ -272,8 +321,10 @@ def evaluate(model, logmel, X, y, synth, bs=512):
 
 def main(epochs=30, bs=256, lr=3e-4, use_synth=False, model_cls=None, out_name="dronenet.pt"):
     X, y, groups, synth = load_cache()
-    tr, va = next(GroupShuffleSplit(n_splits=1, test_size=0.15, random_state=0)
-                  .split(X, y, groups))
+    sp = load_split()
+    tr, va = np.flatnonzero(sp == 0), np.flatnonzero(sp == 1)
+    if (sp == 2).any():
+        print(f"удержано в test и не используется: {(sp == 2).sum()} окон")
 
     # Синтетика (Griffin-Lim) даёт AUC=1.0000 — модель ловит артефакты генерации,
     # а не дрон, и на реальных записях сыпется. Выкидываем из обучения.
@@ -401,6 +452,30 @@ def selfcheck():
     assert torch.isfinite(w2).all() and w2.abs().max() <= 1.0 + 1e-5
     m = DroneNet().to(DEV)
     assert m(s.unsqueeze(1)).shape == (4,)
+
+    # --- замороженный сплит читается из meta, а не пересчитывается.
+    # Настоящего кэша на машине без данных нет, поэтому кладём синтетический.
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        n = 400
+        want = (np.arange(n) % 3).astype(np.int8)
+        np.savez(os.path.join(d, "meta.npz"),
+                 y=(np.arange(n) % 2).astype(np.int8),
+                 group=np.arange(n) // 4, src=np.zeros(n, np.int8),
+                 split=want, synth=np.zeros(n, bool),
+                 n=np.int64(n), win=np.int64(8000))
+        got = load_split(d)
+        assert got.dtype == np.int8 and (got == want).all(), \
+            "сплит должен читаться из meta без изменений"
+
+        # откат на GroupShuffleSplit, если поля split нет (кэши от prep_dads.py)
+        mm = dict(np.load(os.path.join(d, "meta.npz"), allow_pickle=True))
+        del mm["split"]
+        np.savez(os.path.join(d, "meta.npz"), **mm)
+        old = load_split(d)
+        assert set(np.unique(old).tolist()) <= {0, 1}, "откат даёт только train и val"
+        assert 0.10 < (old == 1).mean() < 0.20, (old == 1).mean()
+
     print("selfcheck ok")
 
 

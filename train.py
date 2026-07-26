@@ -13,6 +13,7 @@
 
 import os
 import sys
+import json
 import numpy as np
 import torch
 import torch.nn as nn
@@ -319,7 +320,21 @@ def evaluate(model, logmel, X, y, synth, bs=512):
     return out
 
 
-def main(epochs=30, bs=256, lr=3e-4, use_synth=False, model_cls=None, out_name="dronenet.pt"):
+def _metrics_row(ep, loss, m):
+    """Одна строка jsonl на эпоху. Текстовый лог читает человек, jsonl —
+    инструменты: прогон идёт в Colab, и разбирать его приходится по файлу,
+    вытянутому с HF, а не по экрану, которого уже нет."""
+    row = {"ep": int(ep), "loss": float(loss)}
+    for k in ("auc", "auc_real", "auc_hard", "far_hard@r90"):
+        if k in m:
+            row[k] = float(m[k])
+    if "rec_field" in m:
+        row["rec_field"] = {str(k): float(v) for k, v in m["rec_field"].items()}
+    return row
+
+
+def main(epochs=30, bs=256, lr=3e-4, use_synth=False, model_cls=None,
+         out_name="dronenet.pt", run=None, resume=False):
     X, y, groups, synth = load_cache()
     sp = load_split()
     tr, va = np.flatnonzero(sp == 0), np.flatnonzero(sp == 1)
@@ -379,7 +394,61 @@ def main(epochs=30, bs=256, lr=3e-4, use_synth=False, model_cls=None, out_name="
     ytr = y[tr]
     best = 0.0
 
-    for ep in range(epochs):
+    # Прогон живёт на HF: бесплатный Colab рвёт сессию и теряет диск, а лог
+    # обучения нужно читать снаружи. Имя прогона задаёт каталог runs/<run>/.
+    run = run or os.path.splitext(out_name)[0]
+    remote = f"runs/{run}"
+    os.makedirs(os.path.join(ROOT, "logs"), exist_ok=True)
+    os.makedirs(os.path.join(ROOT, "models"), exist_ok=True)
+    log_p = os.path.join(ROOT, "logs", f"{run}.log")
+    jsonl_p = os.path.join(ROOT, "logs", f"{run}.jsonl")
+    last_p = os.path.join(ROOT, "models", f"{run}_last.pt")
+    start_ep = 0
+
+    if resume:
+        import hub
+        if hub.exists(f"{remote}/last.pt"):
+            ck = torch.load(hub.pull(f"{remote}/last.pt", last_p),
+                            map_location=DEV, weights_only=False)
+            model.load_state_dict(ck["model"])
+            opt.load_state_dict(ck["opt"])
+            sched.load_state_dict(ck["sched"])
+            best = ck.get("best", 0.0)
+            start_ep = int(ck["ep"])
+            torch.set_rng_state(ck["rng"].cpu().to(torch.uint8))
+            np.random.set_state(tuple(ck["np_rng"]))
+
+            # Горизонт эпох берём из чекпоинта, а не из аргумента. OneCycleLR
+            # держит total_steps внутри state_dict, то есть расписание скорости
+            # обучения определено на фиксированном числе шагов. Продолжить
+            # прогон на 4 эпохи как прогон на 12 нельзя: либо расписание
+            # рассыпается (шаг 37 из 36), либо LR идёт не по той кривой, и
+            # результат уже не воспроизводится. Чтобы учить дольше — новый run.
+            ck_epochs = int(ck.get("epochs", epochs))
+            if ck_epochs != epochs:
+                print(f"ВНИМАНИЕ: прогон {run} начат на {ck_epochs} эпох, "
+                      f"запрошено {epochs}. Продолжаю до {ck_epochs} — расписание "
+                      f"OneCycleLR задано на этом горизонте. Для другого числа "
+                      f"эпох запустите новый run.")
+                epochs = ck_epochs
+
+            # Лог и метрики тоже с HF: иначе локальный файл начнётся заново
+            # пустым и следующая выгрузка затрёт на HF всю прошлую историю.
+            for rp, lp in ((f"{remote}/train.log", log_p),
+                           (f"{remote}/metrics.jsonl", jsonl_p)):
+                if hub.exists(rp):
+                    hub.pull(rp, lp)
+            print(f"продолжаем с эпохи {start_ep + 1} из {epochs}, "
+                  f"лучшая метрика {best:.4f}")
+        else:
+            print(f"на HF нет {remote}/last.pt — начинаем с нуля")
+    else:
+        # Не resume — прогон с чистого листа, старый лог не дописываем.
+        for p in (log_p, jsonl_p):
+            if os.path.exists(p):
+                os.remove(p)
+
+    for ep in range(start_ep, epochs):
         perm = np.random.permutation(len(tr))
         tot, n = 0.0, 0
         for i in range(0, len(perm) - bs + 1, bs):
@@ -428,12 +497,35 @@ def main(epochs=30, bs=256, lr=3e-4, use_synth=False, model_cls=None, out_name="
                                     arch=type(model).__name__)},
                        os.path.join(ROOT, "models", out_name))
             tag = "  <- saved"
-        print(f"ep{ep+1:02d} loss {tot/n:.4f}  auc {m['auc']:.4f}  "
-              f"auc_hard {m.get('auc_hard', float('nan')):.4f}  "
-              f"FAR_hard@r90 {m.get('far_hard@r90', float('nan'))*100:.1f}%  "
-              f"recall_поле " + " ".join(
-                  f"{v*100:.1f}%" for v in m.get("rec_field", {}).values()) + tag,
-              flush=True)
+        line = (f"ep{ep+1:02d} loss {tot/n:.4f}  auc {m['auc']:.4f}  "
+                f"auc_hard {m.get('auc_hard', float('nan')):.4f}  "
+                f"FAR_hard@r90 {m.get('far_hard@r90', float('nan'))*100:.1f}%  "
+                f"recall_поле " + " ".join(
+                    f"{v*100:.1f}%" for v in m.get("rec_field", {}).values()) + tag)
+        print(line, flush=True)
+
+        # Выгрузка после КАЖДОЙ эпохи, а не в конце: потерять восемь эпох
+        # из-за обрыва на девятой недопустимо. Сбой выгрузки не должен
+        # останавливать обучение — сеть отвалилась, а GPU-время идёт.
+        with open(log_p, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        with open(jsonl_p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(_metrics_row(ep + 1, tot / n, m),
+                               ensure_ascii=False) + "\n")
+        torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
+                    "sched": sched.state_dict(), "ep": ep + 1, "best": best,
+                    "epochs": epochs, "rng": torch.get_rng_state(),
+                    "np_rng": np.random.get_state()}, last_p)
+        try:
+            import hub
+            hub.push(log_p, f"{remote}/train.log")
+            hub.push(jsonl_p, f"{remote}/metrics.jsonl")
+            hub.push(last_p, f"{remote}/last.pt")
+            if tag:
+                hub.push(os.path.join(ROOT, "models", out_name), f"{remote}/best.pt")
+        except Exception as e:
+            print(f"  выгрузка на HF не удалась ({type(e).__name__}: {e}); "
+                  f"обучение продолжается", flush=True)
 
 
 def selfcheck():
@@ -475,6 +567,49 @@ def selfcheck():
         old = load_split(d)
         assert set(np.unique(old).tolist()) <= {0, 1}, "откат даёт только train и val"
         assert 0.10 < (old == 1).mean() < 0.20, (old == 1).mean()
+
+    # --- строка метрик: ровно одна строка jsonl на эпоху, кириллица не ломается
+    row = _metrics_row(3, 0.42, {"auc": 0.99, "auc_hard": 0.87,
+                                 "far_hard@r90": 0.031,
+                                 "rec_field": {"drone_video1.wav": 0.241}})
+    dumped = json.dumps(row, ensure_ascii=False)
+    assert "\n" not in dumped, "строка jsonl не должна содержать переводов строки"
+    back = json.loads(dumped)
+    assert back["ep"] == 3 and back["loss"] == 0.42
+    assert back["auc_hard"] == 0.87 and back["rec_field"]["drone_video1.wav"] == 0.241
+    # отсутствующие метрики не подставляются нулями и не роняют сериализацию
+    bare = _metrics_row(1, 1.0, {"auc": 0.5})
+    assert set(bare) == {"ep", "loss", "auc"}, bare
+
+    # --- круг сохранения и восстановления состояния прогона.
+    # Именно этим живёт resume: после обрыва сессии Colab всё, кроме этого
+    # словаря, теряется вместе с диском.
+    with tempfile.TemporaryDirectory() as d:
+        net = DroneNet().to(DEV)
+        o = torch.optim.AdamW(net.parameters(), lr=1e-3)
+        sc = torch.optim.lr_scheduler.OneCycleLR(o, 1e-3, total_steps=10)
+        import warnings
+        with warnings.catch_warnings():          # шаг без backward — это тест, не обучение
+            warnings.simplefilter("ignore")
+            sc.step()
+        p = os.path.join(d, "last.pt")
+        torch.save({"model": net.state_dict(), "opt": o.state_dict(),
+                    "sched": sc.state_dict(), "ep": 4, "best": 0.87,
+                    "rng": torch.get_rng_state(),
+                    "np_rng": np.random.get_state()}, p)
+        ck = torch.load(p, map_location=DEV, weights_only=False)
+        net2 = DroneNet().to(DEV)
+        o2 = torch.optim.AdamW(net2.parameters(), lr=1e-3)
+        sc2 = torch.optim.lr_scheduler.OneCycleLR(o2, 1e-3, total_steps=10)
+        net2.load_state_dict(ck["model"])
+        o2.load_state_dict(ck["opt"])
+        sc2.load_state_dict(ck["sched"])
+        torch.set_rng_state(ck["rng"].cpu().to(torch.uint8))
+        np.random.set_state(tuple(ck["np_rng"]))
+        assert int(ck["ep"]) == 4 and ck["best"] == 0.87
+        assert sc2.last_epoch == sc.last_epoch, "планировщик должен продолжиться, а не начаться"
+        for a, b in zip(net.state_dict().values(), net2.state_dict().values()):
+            assert torch.equal(a, b), "веса не совпали после восстановления"
 
     print("selfcheck ok")
 

@@ -25,6 +25,14 @@ if not os.path.isdir("/content/airadar"):
 !git pull -q && git log --oneline -1
 !nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
+# Python кэширует импортированные модули: git pull меняет файл на диске, а
+# import берёт старую версию из памяти. Без этой чистки «Run all» после
+# обновления кода молча работает по-старому.
+import sys
+
+for m in ("hub", "hf_sources", "prep_hf", "prep_field", "train", "train2"):
+    sys.modules.pop(m, None)
+
 # %% [markdown]
 # ## Кэш и полевые записи с HF
 

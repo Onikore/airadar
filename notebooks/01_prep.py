@@ -25,6 +25,15 @@ if not os.path.isdir("/content/airadar"):
 %cd /content/airadar
 !git pull -q && git log --oneline -1
 
+# Python кэширует импортированные модули: git pull меняет файл на диске, а
+# import берёт старую версию из памяти. Без этой чистки «Run all» после
+# обновления кода молча работает по-старому — вплоть до TypeError на
+# аргументе, которого в старой версии не было.
+import sys
+
+for m in ("hub", "hf_sources", "prep_hf", "prep_field", "train", "train2"):
+    sys.modules.pop(m, None)
+
 # %% [markdown]
 # ## Место на диске
 #
@@ -60,8 +69,15 @@ print("права на запись есть")
 # изменится, и лучше остановиться здесь, чем молотить 18 ГБ впустую.
 
 # %%
+import inspect
+
 import hf_sources as S
 import prep_hf
+
+# Страховка от старого модуля в памяти, если чистка выше почему-то не сработала.
+# Внятный текст лучше, чем TypeError на аргументе через сорок минут счёта.
+assert "upload_parts" in inspect.signature(prep_hf.main).parameters, (
+    "в памяти старая версия prep_hf. Runtime -> Restart session, затем Run all")
 
 for src in prep_hf.ORDER:
     sh = S.shards(src)

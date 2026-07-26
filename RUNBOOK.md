@@ -87,6 +87,56 @@ python3 eval.py
 
 ---
 
+## Обучение в Colab
+
+Локально обучать нечем — данных на диске нет, GPU нет. Прогон идёт в Colab,
+кэш и результаты живут в приватном репозитории HF `Onikore/airadar-hub`.
+
+Один раз добавить в Colab секрет `HF_TOKEN` с правом записи: значок ключа
+слева, включить доступ для ноутбука.
+
+```
+notebooks/01_prep.ipynb    сборка кэша из четырёх источников HF, ~30-50 мин, один раз
+notebooks/02_train.ipynb   обучение, кэш тянется за минуты
+```
+
+Ноутбуки клонируют https://github.com/Onikore/airadar.git, поэтому правки
+надо запушить до запуска.
+
+**Обрыв сессии.** Просто запустить ноутбук заново.
+
+- `01_prep` продолжит с недосчитанного шарда (`manifest.json` на HF).
+- `02_train` при `resume=True` подхватит `last.pt` и продолжит с прерванной
+  эпохи, включая состояние оптимизатора, расписания и генераторов случайных
+  чисел — метрики продолжатся побитово, а не с новой траектории.
+
+**Число эпох в начатом прогоне менять нельзя.** `OneCycleLR` задаёт кривую
+скорости обучения на фиксированном горизонте шагов, и возобновление с другим
+числом эпох либо рассыпает расписание, либо ведёт LR не по той кривой. Чтобы
+учить дольше — новое имя `run`.
+
+Читать лог прогона снаружи, без Colab:
+
+```bash
+HF_TOKEN=<токен> python -c "
+import hub, json
+p = hub.pull('runs/dronenet_hf/metrics.jsonl', 'logs/remote.jsonl')
+for l in open(p, encoding='utf-8'):
+    r = json.loads(l)
+    print(r['ep'], r.get('auc_hard'), r.get('rec_field'))
+"
+```
+
+Полевые записи извлекаются из видео отдельным шагом (нужен только при
+добавлении новых записей):
+
+```bash
+pip install imageio-ffmpeg
+python prep_field.py          # *.MOV / *.mp4 в корне -> field/drone_video*.wav
+```
+
+---
+
 ## Живой детектор
 
 ```bash
@@ -116,7 +166,12 @@ python3 spectrum.py        # спектрограммы field/*.wav, поиск 
 
 ```bash
 for f in train.py train2.py eval.py detect.py web.py spectrum.py \
-         prep_dads.py prep_hard.py; do
+         prep_dads.py prep_hard.py prep_field.py \
+         hub.py hf_sources.py prep_hf.py; do
     python3 "$f" --selfcheck
 done
 ```
+
+Все проходят без данных и без GPU: нужны `numpy`, `scipy`, `soundfile`,
+`sklearn`, `pyarrow`, `huggingface_hub` и CPU-сборка torch (см. README,
+раздел «Машина без GPU»).

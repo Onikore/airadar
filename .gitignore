@@ -9,3 +9,9 @@ __pycache__/
 *.pyc
 evalx/*.npz
 parts/
+*.MOV
+*.mp4
+*.mkv
+*.avi
+*.webm
+field/

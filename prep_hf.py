@@ -17,6 +17,7 @@
 
 import os
 import sys
+import json
 import numpy as np
 
 import hub
@@ -201,31 +202,71 @@ def _empty_buf():
 CHECKPOINT_EVERY = 15
 
 
+LOCAL_MANIFEST = os.path.join(PARTS, "manifest.json")
+
+
+def _read_manifest():
+    """Манифест из HF и с диска, объединённые.
+
+    Локальная копия нужна для двух случаев. Первый — upload=False: HF не
+    трогаем совсем, но перезапуск внутри той же сессии должен видеть уже
+    посчитанное. Второй — отказ выгрузки: части на диске есть, и считать их
+    заново незачем.
+
+    Объединяем, а не выбираем: на диске могут быть шарды, не успевшие уехать
+    на HF, а на HF — шарды из прошлой сессии, чьи части уже скачаны.
+    """
+    done = set()
+    try:
+        remote = hub.read_json("manifest.json")
+        if remote:
+            done |= set(remote.get("done", []))
+    except Exception as e:
+        print(f"манифест с HF не прочитан ({type(e).__name__}), беру локальный")
+    if os.path.exists(LOCAL_MANIFEST):
+        with open(LOCAL_MANIFEST, encoding="utf-8") as f:
+            done |= set(json.load(f).get("done", []))
+    return {"done": sorted(done)}
+
+
 def _checkpoint(manifest, upload_parts):
-    """Выгружает накопленные части одним коммитом на кэш и обновляет манифест.
+    """Сохраняет прогресс: локально всегда, на HF — если разрешено.
 
     Порядок важен: сначала части, потом манифест. Манифест — обещание, что
     перечисленные шарды лежат на HF; записанный раньше частей, он при обрыве
     между двумя выгрузками заставил бы пропустить непосчитанное.
+
+    Отказ HF не роняет прогон. Части лежат на диске, манифест тоже, а 429 по
+    лимиту коммитов лечится ожиданием — терять из-за него полчаса счёта нельзя.
     """
-    if upload_parts:
+    os.makedirs(PARTS, exist_ok=True)
+    with open(LOCAL_MANIFEST, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+    if not upload_parts:
+        return True
+    try:
         for cache in CACHES:
             pd = os.path.join(PARTS, cache)
             if os.path.isdir(pd) and os.listdir(pd):
                 hub.push(pd, f"parts/{cache}")
-    hub.write_json(manifest, "manifest.json")
+        hub.write_json(manifest, "manifest.json")
+        return True
+    except Exception as e:
+        print(f"      выгрузка на HF не удалась ({type(e).__name__}: "
+              f"{str(e).splitlines()[0][:120]})")
+        print(f"      части сохранены локально, счёт продолжается")
+        return False
 
 
 def collect(upload_parts=True, limit=None):
     """Считает недостающие шарды в parts/. Возвращает манифест."""
-    manifest = hub.read_json("manifest.json") or {"done": []}
+    manifest = _read_manifest()
     todo = _todo(manifest, listing())
     if limit:
         todo = todo[:limit]
     print(f"шардов к обработке: {len(todo)}  (готово ранее: {len(manifest['done'])})")
-    if upload_parts:
-        print(f"выгрузка на HF раз в {CHECKPOINT_EVERY} шардов "
-              f"(лимит HF — 128 коммитов в час)")
+    print(f"выгрузка на HF: {'раз в %d шардов' % CHECKPOINT_EVERY if upload_parts else 'ОТКЛЮЧЕНА, только локально'}"
+          f"  (лимит HF — 128 коммитов в час)")
 
     pending = 0
     for n, (src, i, path) in enumerate(todo, 1):
@@ -332,12 +373,32 @@ def assemble(upload=True, manifest=None):
             print(f"  {nm:5s} {int(sel.sum()):>7}  дрон {int(y[sel].sum()):>7}")
         coverage_report(split, strata, label=f"{cache}: ")
         if upload:
-            hub.push(out, f"cache/{cache}")
+            try:
+                hub.push(out, f"cache/{cache}")
+                print(f"  выгружен на HF: cache/{cache}")
+            except Exception as e:
+                print(f"  ВЫГРУЗКА НЕ УДАЛАСЬ ({type(e).__name__}: "
+                      f"{str(e).splitlines()[0][:120]})")
+                print(f"  Кэш собран и лежит в {cache}/ — счёт не потерян.")
+                print(f"  Повторить позже одной строкой:")
+                print(f"      python -c \"import hub; hub.push('{cache}', "
+                      f"'cache/{cache}')\"")
 
 
-def main(upload=True, limit=None):
+def main(upload=True, upload_parts=False, limit=None):
+    """upload — выгружать ли готовый кэш (2 коммита, почти всегда нужно).
+    upload_parts — выгружать ли промежуточные части (17 коммитов).
+
+    Части по умолчанию НЕ выгружаются. Они покупают одно: возможность
+    продолжить после смерти сессии Colab, не пересчитывая заново. Стоит это 17
+    коммитов из 128 в час, а сам прогон занимает около получаса, то есть
+    сессия обычно доживает. Внутри одной сессии перезапуск и так продолжается
+    с места обрыва — по локальному манифесту в parts/.
+
+    Ставить upload_parts=True осмысленно, если сессия уже рвалась.
+    """
     hub.ensure_repo()
-    manifest = collect(upload_parts=upload, limit=limit)
+    manifest = collect(upload_parts=upload_parts, limit=limit)
     assemble(upload=upload, manifest=manifest)
 
 
@@ -412,6 +473,41 @@ def selfcheck():
     assert rest == shards_[1:], rest
     assert _todo({"done": [_key(s, i) for s, i, _ in shards_]}, shards_) == [], \
         "всё готово — считать нечего"
+
+    # --- upload_parts=False не должен делать НИ ОДНОГО обращения к HF.
+    # Ровно на этом прогон падал с 429: манифест писался всегда.
+    import tempfile
+    global PARTS, LOCAL_MANIFEST
+    real_parts, real_lm = PARTS, LOCAL_MANIFEST
+    real_push, real_wj = hub.push, hub.write_json
+    calls = []
+    hub.push = lambda l, r: calls.append(("push", r))
+    hub.write_json = lambda o, r: calls.append(("write_json", r))
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            PARTS = d
+            LOCAL_MANIFEST = os.path.join(d, "manifest.json")
+            assert _checkpoint({"done": ["3_0000"]}, upload_parts=False) is True
+            assert calls == [], f"upload=False, а обращения к HF были: {calls}"
+            assert os.path.exists(LOCAL_MANIFEST), "локальный манифест не записан"
+            with open(LOCAL_MANIFEST, encoding="utf-8") as f:
+                assert json.load(f)["done"] == ["3_0000"]
+
+            # отказ HF не роняет прогон, а возвращает False
+            def boom(*a, **k):
+                raise RuntimeError("429 Too Many Requests")
+            hub.write_json = boom
+            assert _checkpoint({"done": ["3_0000"]}, upload_parts=True) is False
+
+            # объединение манифестов: локальный виден даже когда HF недоступен
+            hub.read_json = boom
+            got = _read_manifest()
+            assert got["done"] == ["3_0000"], got
+    finally:
+        PARTS, LOCAL_MANIFEST = real_parts, real_lm
+        hub.push, hub.write_json = real_push, real_wj
+        import importlib
+        importlib.reload(hub)
 
     # --- бюджет коммитов HF: 128 в час. Чекпоинт стоит 3 коммита (два каталога
     # частей плюс манифест), финальная сборка — ещё 2. Считаем на всех 85 шардах.

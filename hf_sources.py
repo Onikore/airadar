@@ -81,8 +81,9 @@ def das_group(file_path):
     mic2_8array-down-File3 — одна запись с двух микрофонов. В разных сплитах
     они дадут ту самую утечку, от которой блоки по 250 защищают DADS.
 
-    Записи *-silence.wav — тот же тракт без дрона. Это негативы, и группа у
-    них отдельная от полётов того же дрона.
+    Записи *-silence.wav возвращают отдельную от полётов группу (см. read_shard
+    про то, почему они не используются как негатив — вопреки названию, это не
+    тишина).
     """
     m = _DAS.search(file_path.replace("\\", "/"))
     if not m:
@@ -236,15 +237,25 @@ def _read_das(pf):
         audio = t.column("audio").combine_chunks()
         arrays, rates = audio.field("array"), audio.field("sampling_rate").to_pylist()
         for i, fp in enumerate(paths):
+            g, silence = das_group(fp)
+            if silence:
+                # "-silence.wav" не значит тишину. Проверено f0_survey: медиана f0
+                # 206 Гц, salience 20.8 дБ, RMS 0.099 — статистически неотличимо от
+                # настоящих полётов того же рига (207 Гц, 20.8 дБ, 0.090). Судя по
+                # всему, это моторы/ESC на холостых без пропеллеров, а не "дрон
+                # выключен". Заведённые как негатив, эти окна дали 99.86% ложных
+                # срабатываний в eval — не ошибка модели, а неверная метка: модель
+                # корректно узнаёт тот же гармонический сигнал, что и в полёте.
+                # Истинная метка неизвестна, поэтому окна пропускаются целиком, а
+                # не угадываются в одну или другую сторону.
+                continue
             ch0 = das_channel0(arrays, i)
             if ch0 is None:
                 continue
             x = to_mono_16k(ch0, int(rates[i]))
             if x is None:
                 continue
-            g, silence = das_group(fp)
-            yield Rec(x, g, 0 if silence else 1,
-                      "drone_rig_silence" if silence else None, SRC_DAS)
+            yield Rec(x, g, 1, None, SRC_DAS)
 
 
 def selfcheck():

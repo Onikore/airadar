@@ -36,7 +36,7 @@ CACHES = ("cache_dads", "cache_hard")
 # Заведена после того, как исправление CAP и ключей групп сделало уже
 # посчитанные части несовместимыми с новыми: смешанные, они дали бы кэш с
 # перекошенным балансом классов и разорванными группами, причём молча.
-PREP_VERSION = 2
+PREP_VERSION = 3
 
 # Окон с одной записи.
 #
@@ -57,13 +57,18 @@ CAP = {
 FRAC = (0.75, 0.15, 0.10)
 
 # Стационарный широкополосный шум механизмов и погода — то, что стоит рядом с
-# дроном в спектре. Список тот же, что в prep_hard.py, плюс тишина стенда
-# DroneAudioSet: тот же микрофон и тракт, что у полётов, честнее негатива нет.
+# дроном в спектре. Список тот же, что в prep_hard.py.
+#
+# "drone_rig_silence" сюда НЕ входит и в hf_sources.py такая метка больше не
+# производится: f0_survey показал, что записи *-silence.wav статистически
+# неотличимы от настоящих полётов того же рига (медиана f0 206 против 207 Гц,
+# salience 20.8 дБ у обоих) — это моторы/ESC на холостых без пропеллеров, а не
+# тишина. Заведённые как негатив, они дали 99.86% ложных срабатываний в eval:
+# не ошибка модели, а неверная метка.
 HARD = {
     "chainsaw", "helicopter", "airplane", "engine", "train", "vacuum_cleaner",
     "washing_machine", "hand_saw", "wind", "rain", "thunderstorm", "crackling_fire",
     "air_conditioner", "drilling", "engine_idling", "jackhammer",
-    "drone_rig_silence",
 }
 
 
@@ -726,16 +731,16 @@ def selfcheck():
         "train", "church_bells", "airplane", "fireworks", "hand_saw",
         "air_conditioner", "children_playing", "dog_bark", "drilling",
         "engine_idling", "gun_shot", "jackhammer", "street_music",
-        "drone_rig_silence",
     }
     assert HARD <= known, f"опечатка в HARD: {HARD - known}"
 
-    # --- маршрутизация по кэшам
+    # --- маршрутизация по кэшам. DroneAudioSet больше не даёт cat вообще —
+    # hf_sources.py пропускает *-silence.wav целиком, а не размечает их
+    # негативом (см. HARD выше про 99.86% ложных срабатываний на неверной метке).
     R = S.Rec
     assert _dest(R(None, 0, 1, None, SRC_DADS)) == "cache_dads"
     assert _dest(R(None, 0, 1, None, SRC_DAS)) == "cache_dads"
     assert _dest(R(None, 0, 0, "wind", SRC_ESC)) == "cache_hard"
-    assert _dest(R(None, 0, 0, "drone_rig_silence", SRC_DAS)) == "cache_hard"
 
     # --- баланс классов DADS на РЕАЛЬНЫХ числах датасета.
     # Проверяем замысел, а не константу: кэп существует ради примерно равного

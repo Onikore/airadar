@@ -83,7 +83,7 @@ SR = 16000
 def selfcheck():
     # длина ряда оценок: первое окно занимает context, дальше шаг hop
     assert n_scores(8000, 0.5, 0.25) == 1          # ровно одно окно
-    assert n_scores(12000, 0.5, 0.25) == 3         # 0.75 с -> окна в 0, 0.25
+    assert n_scores(12000, 0.5, 0.25) == 2         # 0.75 с -> окна в 0, 0.25
     assert n_scores(4000, 0.5, 0.25) == 0          # короче контекста
     assert n_scores(64000, 4.0, 0.128) == 1        # ровно 4 с
 
@@ -140,7 +140,7 @@ Expected: PASS, `scorer selfcheck ok`
             return np.zeros(n, np.float32)
 
     s = Fake()
-    assert check_scorer(s, n_samples=12000) == 3
+    assert check_scorer(s, n_samples=12000) == 2
 
     # рассинхронизация шага и контекста должна ловиться, а не молча врать
     class Broken(Fake):

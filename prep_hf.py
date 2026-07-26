@@ -96,13 +96,32 @@ def assign_split(groups, strata, frac=FRAC, seed=0):
     групп одинакового размера.
     """
     groups, strata = np.asarray(groups), np.asarray(strata)
-    split = np.full(len(groups), -1, np.int8)
+    g_ids, inv = np.unique(groups, return_inverse=True)
+
+    # Окна каждой группы подряд — чтобы считать размер и страту группы за один
+    # проход, а не искать по всему массиву на каждую из тысяч групп.
+    order = np.argsort(inv, kind="stable")
+    bounds = np.searchsorted(inv[order], np.arange(len(g_ids) + 1))
+    sizes = np.diff(bounds)
+
+    # Страта — свойство ГРУППЫ, а не окна, и это принципиально. Одна исходная
+    # запись UrbanSound8K (fsID) содержит нарезки, у которых категории могут
+    # различаться. Со стратой по окну такая группа попадала в две страты,
+    # раскладывалась дважды и оказывалась разорвана между train и val — ровно
+    # то, от чего группировка защищает. Берём преобладающую категорию группы.
+    g_str = np.empty(len(g_ids), dtype=object)
+    for j in range(len(g_ids)):
+        seg = strata[order[bounds[j]:bounds[j + 1]]]
+        vals, cnt = np.unique(seg, return_counts=True)
+        g_str[j] = vals[cnt.argmax()]
+    g_str = np.asarray(g_str.tolist())
+
+    g_part = np.full(len(g_ids), -1, np.int8)
     rng = np.random.default_rng(seed)
 
-    for st in np.unique(strata):
-        sel = strata == st
-        gs, counts = np.unique(groups[sel], return_counts=True)
-        n = len(gs)
+    for st in np.unique(g_str):
+        idx = np.flatnonzero(g_str == st)
+        n = len(idx)
         if n == 1:
             n_va = n_te = 0
         elif n == 2:
@@ -113,27 +132,23 @@ def assign_split(groups, strata, frac=FRAC, seed=0):
 
         # перемешиваем до сортировки: так группы равного размера получают
         # воспроизводимый, но не зависящий от исходного порядка приоритет
-        perm = rng.permutation(n)
-        gs, counts = gs[perm], counts[perm]
-        order = np.argsort(-counts, kind="stable")
-
-        total = counts.sum()
+        idx = idx[rng.permutation(n)]
+        cnt = sizes[idx]
+        total = cnt.sum()
         want = [total * frac[0], total * frac[1], total * frac[2]]
         have = [0.0, 0.0, 0.0]
         slots = [n - n_va - n_te, n_va, n_te]
-        table = {}
-        for j in order:
+        for j in np.argsort(-cnt, kind="stable"):
             p = max((q for q in (0, 1, 2) if slots[q] > 0),
                     key=lambda q: want[q] - have[q])
-            table[gs[j].item()] = p
-            have[p] += counts[j]
+            g_part[idx[j]] = p
+            have[p] += cnt[j]
             slots[p] -= 1
 
-        idx = np.flatnonzero(sel)
-        split[idx] = [table[g] for g in groups[idx].tolist()]
-
-    assert (split >= 0).all(), "остались нераспределённые окна"
-    return split
+    assert (g_part >= 0).all(), "остались нераспределённые группы"
+    # Раздача по окнам через inv: группа физически не может оказаться в двух
+    # частях, потому что решение принимается один раз на группу.
+    return g_part[inv].astype(np.int8)
 
 
 def coverage_report(split, strata, label=""):
@@ -443,6 +458,21 @@ def assemble(upload=True, manifest=None):
             src.astype(str), np.char.add("_", y.astype(str)))
         split = assign_split(g, strata)
 
+        # Несущая гарантия всего измерения: куски одной записи не расходятся по
+        # разным частям. assign_split делает её невозможной по построению, но
+        # проверяем здесь, а не только в ноутбуке — ноутбук легко оказывается
+        # старой версии, а испорченный сплит виден только по надутой метрике.
+        gi, inv = np.unique(g, return_inverse=True)
+        lo = np.full(len(gi), 127, np.int8)
+        hi = np.full(len(gi), -1, np.int8)
+        np.minimum.at(lo, inv, split)
+        np.maximum.at(hi, inv, split)
+        torn = np.flatnonzero(lo != hi)
+        assert len(torn) == 0, (
+            f"{cache}: {len(torn)} групп разорвано между частями, например "
+            f"{gi[torn[:5]].tolist()}. Ключ группы не различает записи, "
+            f"которые должен различать.")
+
         meta = dict(y=y, group=g, src=src, split=split,
                     synth=np.zeros(len(y), bool),
                     n=np.int64(len(y)), win=np.int64(WIN))
@@ -549,6 +579,33 @@ def selfcheck():
     # --- страта из двух групп попадает в отчёт как отсутствующая в test
     miss = coverage_report(two, np.zeros(10, int))
     assert miss[2] and not miss[1]
+
+    # --- ГРУППА С НЕСКОЛЬКИМИ КАТЕГОРИЯМИ не должна разрываться.
+    # Так устроен UrbanSound8K: одна запись Freesound (fsID) даёт нарезки, у
+    # которых категории различаются. Со стратой по окну такая группа
+    # раскладывалась дважды и уезжала в train и val одновременно.
+    gm = np.repeat([10, 11, 12, 13, 14, 15], 6)
+    cm = np.array(
+        ["car_horn"] * 4 + ["street_music"] * 2 +      # группа 10: две категории
+        ["street_music"] * 6 +
+        ["car_horn"] * 6 +
+        ["street_music"] * 3 + ["car_horn"] * 3 +      # группа 13: ровно пополам
+        ["car_horn"] * 6 +
+        ["street_music"] * 6)
+    spm = assign_split(gm, cm)
+    for gid in np.unique(gm):
+        assert len(np.unique(spm[gm == gid])) == 1, \
+            f"группа {gid} разорвана: страта должна считаться по группе, не по окну"
+    assert len(np.unique(spm)) >= 2, "при шести группах должны быть разные части"
+
+    # и то же самое на «настоящем» ключе UrbanSound8K, который поймал ошибку
+    import hf_sources as _S
+    g_urban = np.repeat([_S.urban_group(77751), _S.urban_group(77752)], 8)
+    c_urban = np.array(["car_horn"] * 5 + ["street_music"] * 3 +
+                       ["street_music"] * 8)
+    sp_u = assign_split(g_urban, c_urban)
+    for gid in np.unique(g_urban):
+        assert len(np.unique(sp_u[g_urban == gid])) == 1, f"группа {gid} разорвана"
 
     # --- ключи частей стабильны и сортируемы (от них зависит порядок склейки)
     assert _key(SRC_ESC, 0) == "3_0000" and _key(SRC_DADS, 12) == "0_0012"

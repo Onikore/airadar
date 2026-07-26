@@ -29,12 +29,27 @@ WIN = 8000                       # 0.5 с при 16 кГц
 PARTS = os.path.join(ROOT, "parts")
 CACHES = ("cache_dads", "cache_hard")
 
-# Окон с одной записи. У DADS клипы дрона по 0.6 с, фона по 7.3 с — отсюда
-# перекос 16 к 1, он выравнивает вклад классов. Для DroneAudioSet кэп при
-# нынешних данных не срабатывает ни на чём (самая длинная запись 152 с даёт
-# 304 окна) — это страховка на случай перезаливки датасета.
+# Версия формата частей. Поднимать при любом изменении, меняющем содержимое:
+# правка CAP, правка ключей групп, правка нарезки окон. Части старой версии
+# отбраковываются и пересчитываются.
+#
+# Заведена после того, как исправление CAP и ключей групп сделало уже
+# посчитанные части несовместимыми с новыми: смешанные, они дали бы кэш с
+# перекошенным балансом классов и разорванными группами, причём молча.
+PREP_VERSION = 2
+
+# Окон с одной записи.
+#
+# У DADS кэп больше у ФОНА, а не у дрона, и это не опечатка. Файлов дрона
+# 163 591, но они по 0.6 с — с каждого выходит одно окно. Файлов фона всего
+# 16 729, зато они по 7.3 с. Взяв с фона 16 окон, получаем 177 тысяч против
+# 163 тысяч, то есть примерно равный вклад классов. Наоборот (16 дрону, 1
+# фону) набор становится на 92% дроном — проверено, так и было.
+#
+# Для DroneAudioSet кэп при нынешних данных не срабатывает ни на чём (самая
+# длинная запись 152 с даёт 304 окна) — это страховка на случай перезаливки.
 CAP = {
-    (SRC_DADS, 1): 16, (SRC_DADS, 0): 1,
+    (SRC_DADS, 0): 16, (SRC_DADS, 1): 1,
     (SRC_DAS, 1): 700, (SRC_DAS, 0): 700,
     (SRC_URBAN, 0): 4, (SRC_ESC, 0): 5,
 }
@@ -181,7 +196,8 @@ def _write_part(key, buf):
                  y=np.array(d["y"], np.int8),
                  group=np.array(d["group"], np.int64),
                  src=np.array(d["src"], np.int8),
-                 cat=np.array(d["cat"]))
+                 cat=np.array(d["cat"]),
+                 ver=np.int64(PREP_VERSION))
         written.append((cache, key))
     return written
 
@@ -217,16 +233,25 @@ def _read_manifest():
     на HF, а на HF — шарды из прошлой сессии, чьи части уже скачаны.
     """
     done = set()
+    sources = []
     try:
-        remote = hub.read_json("manifest.json")
-        if remote:
-            done |= set(remote.get("done", []))
+        sources.append(("HF", hub.read_json("manifest.json")))
     except Exception as e:
         print(f"манифест с HF не прочитан ({type(e).__name__}), беру локальный")
     if os.path.exists(LOCAL_MANIFEST):
         with open(LOCAL_MANIFEST, encoding="utf-8") as f:
-            done |= set(json.load(f).get("done", []))
-    return {"done": sorted(done)}
+            sources.append(("локально", json.load(f)))
+
+    for where, m in sources:
+        if not m:
+            continue
+        ver = int(m.get("ver", 1))
+        if ver != PREP_VERSION:
+            print(f"манифест ({where}) от формата v{ver}, сейчас v{PREP_VERSION} — "
+                  f"{len(m.get('done', []))} шардов будут пересчитаны")
+            continue
+        done |= set(m.get("done", []))
+    return {"done": sorted(done), "ver": PREP_VERSION}
 
 
 def _checkpoint(manifest, upload_parts):
@@ -240,6 +265,7 @@ def _checkpoint(manifest, upload_parts):
     лимиту коммитов лечится ожиданием — терять из-за него полчаса счёта нельзя.
     """
     os.makedirs(PARTS, exist_ok=True)
+    manifest["ver"] = PREP_VERSION
     with open(LOCAL_MANIFEST, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
     if not upload_parts:
@@ -297,11 +323,39 @@ def collect(upload_parts=True, limit=None):
     return manifest
 
 
+def _part_version(path):
+    try:
+        m = np.load(path, allow_pickle=True)
+        return int(m["ver"]) if "ver" in m.files else 1
+    except Exception:
+        return None                  # битый файл — считаем отсутствующим
+
+
 def _local_parts(cache):
+    """Ключи частей нужной версии. Части чужой версии не возвращаются, значит
+    будут пересчитаны, а не подмешаны к новым."""
     pd = os.path.join(PARTS, cache)
     if not os.path.isdir(pd):
         return set()
-    return {f[:-4] for f in os.listdir(pd) if f.endswith(".npz")}
+    out, stale = set(), 0
+    for f in sorted(os.listdir(pd)):
+        if not f.endswith(".npz"):
+            continue
+        if _part_version(os.path.join(pd, f)) == PREP_VERSION:
+            out.add(f[:-4])
+            continue
+        # Часть чужой версии не пригодится никогда, а .bin занимает до 140 МБ.
+        # Удаляем сразу, иначе на диске Colab копятся гигабайты мусора, который
+        # ещё и путает при разборе.
+        stale += 1
+        for ext in (".npz", ".bin"):
+            p = os.path.join(pd, f[:-4] + ext)
+            if os.path.exists(p):
+                os.remove(p)
+    if stale:
+        print(f"  {cache}: удалено частей старого формата: {stale} "
+              f"(будут пересчитаны)")
+    return out
 
 
 def assemble(upload=True, manifest=None):
@@ -403,6 +457,11 @@ def main(upload=True, upload_parts=False, limit=None):
 
 
 def selfcheck():
+    # Часть проверок подменяет PARTS и LOCAL_MANIFEST на временный каталог,
+    # поэтому объявление обязано стоять до первого присваивания.
+    global PARTS, LOCAL_MANIFEST
+    import tempfile
+
     # --- нарезка окон: поведение как в prep_dads.py
     assert len(windows(np.zeros(WIN), 4)) == 1
     assert len(windows(np.zeros(WIN * 10), 4)) == 4
@@ -464,6 +523,51 @@ def selfcheck():
     assert _key(SRC_ESC, 0) == "3_0000" and _key(SRC_DADS, 12) == "0_0012"
     assert sorted([_key(0, 10), _key(0, 9), _key(0, 100)]) == ["0_0009", "0_0010", "0_0100"]
 
+    # --- версия формата: части и манифест чужой версии не принимаются.
+    # Иначе исправление CAP или ключей групп молча смешало бы несовместимые
+    # части, дав перекошенный баланс классов и разорванные группы.
+    with tempfile.TemporaryDirectory() as d:
+        real_parts, real_lm = PARTS, LOCAL_MANIFEST
+        real_rj = hub.read_json
+        PARTS = d
+        LOCAL_MANIFEST = os.path.join(d, "manifest.json")
+        hub.read_json = lambda r: None
+        try:
+            pd = os.path.join(d, "cache_dads")
+            os.makedirs(pd)
+            # своя версия — принимается
+            np.savez(os.path.join(pd, "0_0000.npz"), y=np.zeros(1, np.int8),
+                     group=np.zeros(1, np.int64), src=np.zeros(1, np.int8),
+                     cat=np.array([""]), ver=np.int64(PREP_VERSION))
+            open(os.path.join(pd, "0_0000.bin"), "wb").close()
+            # чужая — отбраковывается и удаляется вместе с .bin
+            np.savez(os.path.join(pd, "0_0001.npz"), y=np.zeros(1, np.int8),
+                     group=np.zeros(1, np.int64), src=np.zeros(1, np.int8),
+                     cat=np.array([""]), ver=np.int64(PREP_VERSION - 1))
+            open(os.path.join(pd, "0_0001.bin"), "wb").close()
+            # без поля ver — тоже чужая (формат v1)
+            np.savez(os.path.join(pd, "0_0002.npz"), y=np.zeros(1, np.int8),
+                     group=np.zeros(1, np.int64), src=np.zeros(1, np.int8),
+                     cat=np.array([""]))
+            open(os.path.join(pd, "0_0002.bin"), "wb").close()
+
+            got = _local_parts("cache_dads")
+            assert got == {"0_0000"}, got
+            assert not os.path.exists(os.path.join(pd, "0_0001.bin")), \
+                "устаревший .bin должен удаляться, он весит до 140 МБ"
+            assert not os.path.exists(os.path.join(pd, "0_0002.npz"))
+
+            # манифест старой версии не даёт пропустить шарды
+            with open(LOCAL_MANIFEST, "w", encoding="utf-8") as f:
+                json.dump({"done": ["0_0000", "0_0001"], "ver": PREP_VERSION - 1}, f)
+            assert _read_manifest()["done"] == [], "манифест чужой версии принят"
+            with open(LOCAL_MANIFEST, "w", encoding="utf-8") as f:
+                json.dump({"done": ["0_0000"], "ver": PREP_VERSION}, f)
+            assert _read_manifest()["done"] == ["0_0000"]
+        finally:
+            PARTS, LOCAL_MANIFEST = real_parts, real_lm
+            hub.read_json = real_rj
+
     # --- манифест: докачка считает только недостающее
     shards_ = [(SRC_ESC, 0, "a.parquet"), (SRC_ESC, 1, "b.parquet"),
                (SRC_DADS, 0, "c.parquet")]
@@ -476,8 +580,6 @@ def selfcheck():
 
     # --- upload_parts=False не должен делать НИ ОДНОГО обращения к HF.
     # Ровно на этом прогон падал с 429: манифест писался всегда.
-    import tempfile
-    global PARTS, LOCAL_MANIFEST
     real_parts, real_lm = PARTS, LOCAL_MANIFEST
     real_push, real_wj = hub.push, hub.write_json
     calls = []
@@ -541,6 +643,21 @@ def selfcheck():
     assert _dest(R(None, 0, 1, None, SRC_DAS)) == "cache_dads"
     assert _dest(R(None, 0, 0, "wind", SRC_ESC)) == "cache_hard"
     assert _dest(R(None, 0, 0, "drone_rig_silence", SRC_DAS)) == "cache_hard"
+
+    # --- баланс классов DADS на РЕАЛЬНЫХ числах датасета.
+    # Проверяем замысел, а не константу: кэп существует ради примерно равного
+    # вклада классов. Перевёрнутый (16 дрону, 1 фону) даёт 91% дрона — именно
+    # это и случилось на первом полном прогоне.
+    N_DRONE, SEC_DRONE = 163_591, 0.60      # средняя длина клипа дрона
+    N_BG, SEC_BG = 16_729, 7.28             # и фона, из README
+    def _n_win(sec, cap):
+        return min(max(int(sec / 0.5), 1), cap)
+    w_drone = N_DRONE * _n_win(SEC_DRONE, CAP[(SRC_DADS, 1)])
+    w_bg = N_BG * _n_win(SEC_BG, CAP[(SRC_DADS, 0)])
+    share = w_drone / (w_drone + w_bg)
+    assert 0.35 < share < 0.65, (
+        f"дрон занял бы {share*100:.0f}% окон DADS. Кэп фона должен быть больше "
+        f"кэпа дрона: файлов фона в 10 раз меньше, но они в 12 раз длиннее")
 
     # --- у каждой пары (источник, класс) есть кэп
     for src in (SRC_DADS, SRC_DAS, SRC_URBAN, SRC_ESC):

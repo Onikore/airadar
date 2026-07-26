@@ -22,6 +22,7 @@ from scipy.signal import resample_poly
 SR = 16000
 SRC_DADS, SRC_DAS, SRC_URBAN, SRC_ESC = 0, 1, 2, 3
 OFFSET = 10 ** 8                 # пространство групп на источник
+LABEL_OFFSET = 10 ** 7           # и на метку внутри источника
 BLOCK = 250                      # блок номеров DADS, как в prep_dads.py
 
 REPOS = {
@@ -46,16 +47,30 @@ _NUM = re.compile(r"(\d+)")
 _DAS = re.compile(r"/(drone\d+)-only/.*?/[^/]*?-?(File\d+|silence)\.wav$")
 
 
-def dads_group(idx):
-    return SRC_DADS * OFFSET + idx // BLOCK
+def _gid(src, label, key):
+    """Ключ группы: источник, метка, номер записи.
+
+    Метка входит в ключ обязательно. В DADS нумерация своя у каждого класса —
+    drone-100.wav и no-drone-100.wav это разные записи, — и без метки они
+    склеиваются в одну группу. Дальше assign_split раскладывает страты дрона и
+    фона независимо, одна и та же группа уезжает в train и в val, и утечка
+    готова. Так и было: «группа 0 разорвана».
+    """
+    key = int(key)
+    assert 0 <= key < LABEL_OFFSET, f"номер записи {key} не влезает в ключ"
+    return src * OFFSET + int(label) * LABEL_OFFSET + key
+
+
+def dads_group(idx, label):
+    return _gid(SRC_DADS, label, idx // BLOCK)
 
 
 def urban_group(fs_id):
-    return SRC_URBAN * OFFSET + int(fs_id)
+    return _gid(SRC_URBAN, 0, fs_id)
 
 
 def esc_group(src_file):
-    return SRC_ESC * OFFSET + int(src_file)
+    return _gid(SRC_ESC, 0, src_file)
 
 
 def das_group(file_path):
@@ -75,8 +90,7 @@ def das_group(file_path):
     silence = tail == "silence"
     dnum = int(_NUM.search(drone).group(1))
     fnum = 0 if silence else int(_NUM.search(tail).group(1))
-    key = dnum * 1000 + (500 if silence else fnum)
-    return SRC_DAS * OFFSET + key, silence
+    return _gid(SRC_DAS, 0 if silence else 1, dnum * 1000 + fnum), silence
 
 
 def to_mono_16k(data, sr):
@@ -136,7 +150,8 @@ def read_shard(src, path):
             if src == SRC_DADS:
                 m = _NUM.search(r["audio"]["path"] or "")
                 idx = int(m.group(1)) if m else 0
-                yield Rec(x, dads_group(idx), int(r["label"]), None, src)
+                lab = int(r["label"])
+                yield Rec(x, dads_group(idx, lab), lab, None, src)
             elif src == SRC_URBAN:
                 yield Rec(x, urban_group(r["fsID"]), 0, r["class"], src)
             else:
@@ -220,10 +235,34 @@ def selfcheck():
 
     # пространства групп источников не пересекаются
     assert a // OFFSET == SRC_DAS
-    assert dads_group(20941) // OFFSET == SRC_DADS
+    assert dads_group(20941, 1) // OFFSET == SRC_DADS
     assert urban_group(100032) // OFFSET == SRC_URBAN
     assert esc_group(7973) // OFFSET == SRC_ESC
-    assert dads_group(20941) == dads_group(20999) != dads_group(21999)   # блок 250
+    # блок 250: соседние номера в одной группе, далёкие — в разных
+    assert dads_group(20941, 1) == dads_group(20999, 1) != dads_group(21999, 1)
+
+    # ГЛАВНОЕ про DADS: нумерация своя у каждого класса, поэтому drone-100.wav
+    # и no-drone-100.wav обязаны дать РАЗНЫЕ группы. Без метки в ключе они
+    # склеивались, и assign_split разрывал такую группу между train и val.
+    assert dads_group(100, 1) != dads_group(100, 0), \
+        "метка должна входить в ключ группы DADS"
+    assert dads_group(0, 1) != dads_group(0, 0)
+    # и это не должно ломать разделение источников
+    assert dads_group(100, 0) // OFFSET == dads_group(100, 1) // OFFSET == SRC_DADS
+
+    # тишина и полёты DroneAudioSet тоже в разных пространствах меток
+    flight, _ = das_group(base.format(d="drone1", c=25, t="low", m="mic1_soundskrit", n=3))
+    sil_g, _ = das_group(
+        "drone-only-recordings/drone1-only/mic-dist-25cm/throttle-low/mic1_soundskrit-silence.wav")
+    assert (flight // LABEL_OFFSET) % 10 != (sil_g // LABEL_OFFSET) % 10
+
+    # номер записи, не влезающий в ключ, должен падать, а не молча переполняться
+    try:
+        _gid(SRC_ESC, 0, LABEL_OFFSET)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("переполнение ключа должно быть замечено")
 
     # битый путь не проглатывается молча
     try:

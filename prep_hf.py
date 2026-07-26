@@ -431,7 +431,12 @@ def assemble(upload=True, manifest=None):
                 os.makedirs(pd, exist_ok=True)
                 for ext in (".bin", ".npz"):
                     hub.pull(f"parts/{cache}/{k}{ext}", os.path.join(pd, k + ext))
-                keys.add(k)
+        if need:
+            # Пересчитываем список через _local_parts, а не добавляем скачанное
+            # вслепую: на HF остаются части прошлого формата, и подмешать их в
+            # сборку значило бы получить кэш с перекошенным балансом и
+            # разорванными группами. _local_parts заодно их и удалит.
+            keys = _local_parts(cache)
         keys = sorted(keys)
         if not keys:
             print(f"{cache}: частей нет, пропускаю")

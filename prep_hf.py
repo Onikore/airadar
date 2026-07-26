@@ -217,6 +217,14 @@ def _empty_buf():
 # просто пересчитаются — рассинхронизации не будет.
 CHECKPOINT_EVERY = 15
 
+# Шардов, скачиваемых наперёд, пока считается текущий.
+#
+# Замер на пяти шардах DADS по 75 МБ, холодный кэш: последовательно 9.7 МБ/с,
+# с глубиной 3 — 17.2 МБ/с, с 6 — 25.3 МБ/с, с 10 — те же 25 МБ/с. То есть
+# шесть потоков насыщают канал, больше не нужно. Цена — до PREFETCH шардов на
+# диске одновременно (у DADS отдельные файлы до 1.3 ГБ, пик около 5 ГБ).
+PREFETCH = 6
+
 
 LOCAL_MANIFEST = os.path.join(PARTS, "manifest.json")
 
@@ -294,29 +302,52 @@ def collect(upload_parts=True, limit=None):
     print(f"выгрузка на HF: {'раз в %d шардов' % CHECKPOINT_EVERY if upload_parts else 'ОТКЛЮЧЕНА, только локально'}"
           f"  (лимит HF — 128 коммитов в час)")
 
+    S.enable_fast_transfer()
+
+    # Загрузка следующих шардов идёт параллельно счёту текущего. Замер: счёт
+    # шарда DADS занимает ~4 с, загрузка 75 МБ — 5-8 с, то есть последовательно
+    # больше половины времени уходит на ожидание сети. Параллельные загрузки
+    # к тому же складываются по пропускной способности, если канал не насыщен
+    # одним потоком. Глубина 3 хватает и не раздувает диск.
+    from concurrent.futures import ThreadPoolExecutor
+
     pending = 0
-    for n, (src, i, path) in enumerate(todo, 1):
-        key = _key(src, i)
-        buf = _empty_buf()
-        for rec in S.read_shard(src, path):
-            d = buf[_dest(rec)]
-            for w in windows(rec.audio, CAP[(rec.src, rec.label)]):
-                d["w"].append((w * 32767).astype(np.int16))
-                d["y"].append(rec.label)
-                d["group"].append(rec.group)
-                d["src"].append(rec.src)
-                d["cat"].append(rec.cat or "")
-        _write_part(key, buf)
-        manifest["done"].append(key)
-        pending += 1
-        print(f"  [{n}/{len(todo)}] {S.NAMES[src]} шард {i}  "
-              f"dads={len(buf['cache_dads']['y'])} hard={len(buf['cache_hard']['y'])}",
-              flush=True)
-        if pending >= CHECKPOINT_EVERY:
-            _checkpoint(manifest, upload_parts)
-            pending = 0
-            print(f"      чекпоинт на HF: {len(manifest['done'])} шардов готово",
-                  flush=True)
+    with ThreadPoolExecutor(max_workers=PREFETCH) as pool:
+        futures = {}
+
+        def submit(k):
+            if 0 <= k < len(todo):
+                s, _, rel = todo[k]
+                futures[k] = pool.submit(S.local_shard, s, rel)
+
+        for k in range(PREFETCH):
+            submit(k)
+
+        for n, (src, i, rel) in enumerate(todo):
+            local = futures.pop(n).result()
+            submit(n + PREFETCH)
+
+            key = _key(src, i)
+            buf = _empty_buf()
+            for rec in S.read_shard(src, local):
+                d = buf[_dest(rec)]
+                for w in windows(rec.audio, CAP[(rec.src, rec.label)]):
+                    d["w"].append((w * 32767).astype(np.int16))
+                    d["y"].append(rec.label)
+                    d["group"].append(rec.group)
+                    d["src"].append(rec.src)
+                    d["cat"].append(rec.cat or "")
+            _write_part(key, buf)
+            manifest["done"].append(key)
+            pending += 1
+            print(f"  [{n+1}/{len(todo)}] {S.NAMES[src]} шард {i}  "
+                  f"dads={len(buf['cache_dads']['y'])} "
+                  f"hard={len(buf['cache_hard']['y'])}", flush=True)
+            if pending >= CHECKPOINT_EVERY:
+                _checkpoint(manifest, upload_parts)
+                pending = 0
+                print(f"      чекпоинт: {len(manifest['done'])} шардов готово",
+                      flush=True)
 
     if pending:
         _checkpoint(manifest, upload_parts)

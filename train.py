@@ -454,9 +454,19 @@ def main(epochs=30, bs=256, lr=3e-4, use_synth=False, model_cls=None,
             if os.path.exists(p):
                 os.remove(p)
 
+    # Синхронизаций CPU<->GPU в секунду, не батчей: .item() каждый батч
+    # заставляет CPU ждать полного завершения GPU перед тем, как готовить
+    # следующий батч — никакого перекрытия загрузки данных и счёта. Замерено:
+    # 12 батч/с при чистой загрузке 5,9 мс и вычислении ~75-80 мс — цикл был
+    # полностью последовательным. LOSS_SYNC_EVERY копит loss на GPU (никакого
+    # .item()) и синхронизируется раз в N батчей вместо каждого — CPU успевает
+    # уйти вперёд готовить следующие батчи, пока GPU досчитывает текущие.
+    LOSS_SYNC_EVERY = 20
+
     for ep in range(start_ep, epochs):
         perm = np.random.permutation(len(tr))
-        tot, n = 0.0, 0
+        tot_gpu = torch.zeros((), device=DEV)
+        n = 0
         starts = range(0, len(perm) - bs + 1, bs)
         # tqdm необязателен: если пакета нет, поведение не меняется, просто
         # без бара. При выводе в файл (tee) \r считается .NET-ридером за конец
@@ -479,9 +489,11 @@ def main(epochs=30, bs=256, lr=3e-4, use_synth=False, model_cls=None,
             loss.backward()
             opt.step()
             sched.step()
-            tot += loss.item(); n += 1
-            if _HAS_TQDM:
-                bar.set_postfix(loss=f"{tot/n:.4f}")
+            tot_gpu += loss.detach()             # остаётся на GPU, без синхронизации
+            n += 1
+            if _HAS_TQDM and n % LOSS_SYNC_EVERY == 0:
+                bar.set_postfix(loss=f"{(tot_gpu / n).item():.4f}")
+        tot = tot_gpu.item()                     # единственная точка синхронизации на эпоху
         m = evaluate(model, logmel, Xva, yva, sva)
         # Отбираем чекпоинт по AUC "дрон против механического шума и погоды",
         # а не по AUC на val DADS: там негативы — лай и звонки, метрика упирается

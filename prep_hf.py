@@ -1,0 +1,412 @@
+"""Сборка кэша окон из четырёх источников HF с замороженным сплитом.
+
+Отличие от prep_dads.py: сплит считается здесь и кладётся в meta.npz, а не
+пересчитывается при каждом обучении. При четырёх источниках и кэше, живущем
+на HF, сплит обязан быть одинаковым между сессиями — иначе два прогона
+несравнимы, а именно этим проект и болел (см. NEXT_STEPS.md, шаг 0).
+
+Третья часть (test) не трогается до финальной проверки. Сейчас в проекте
+удержанной части нет вообще: auc_hard одновременно отбирает чекпоинт и
+служит отчётным числом, то есть числа для отчёта в проекте нет.
+
+Устойчивость к обрыву сессии Colab: каждый шард пишется отдельным парным
+файлом в parts/ и выгружается на HF сразу. Манифест на HF перечисляет готовые
+шарды. Повторный запуск считает только недостающее, а сборка кэша целиком
+происходит в конце из частей.
+"""
+
+import os
+import sys
+import numpy as np
+
+import hub
+import hf_sources as S
+from hf_sources import SRC_DADS, SRC_DAS, SRC_URBAN, SRC_ESC
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+WIN = 8000                       # 0.5 с при 16 кГц
+PARTS = os.path.join(ROOT, "parts")
+CACHES = ("cache_dads", "cache_hard")
+
+# Окон с одной записи. У DADS клипы дрона по 0.6 с, фона по 7.3 с — отсюда
+# перекос 16 к 1, он выравнивает вклад классов. Для DroneAudioSet кэп при
+# нынешних данных не срабатывает ни на чём (самая длинная запись 152 с даёт
+# 304 окна) — это страховка на случай перезаливки датасета.
+CAP = {
+    (SRC_DADS, 1): 16, (SRC_DADS, 0): 1,
+    (SRC_DAS, 1): 700, (SRC_DAS, 0): 700,
+    (SRC_URBAN, 0): 4, (SRC_ESC, 0): 5,
+}
+
+FRAC = (0.75, 0.15, 0.10)
+
+# Стационарный широкополосный шум механизмов и погода — то, что стоит рядом с
+# дроном в спектре. Список тот же, что в prep_hard.py, плюс тишина стенда
+# DroneAudioSet: тот же микрофон и тракт, что у полётов, честнее негатива нет.
+HARD = {
+    "chainsaw", "helicopter", "airplane", "engine", "train", "vacuum_cleaner",
+    "washing_machine", "hand_saw", "wind", "rain", "thunderstorm", "crackling_fire",
+    "air_conditioner", "drilling", "engine_idling", "jackhammer",
+    "drone_rig_silence",
+}
+
+
+def windows(x, cap):
+    if len(x) < WIN:
+        return [np.tile(x, int(np.ceil(WIN / len(x))))[:WIN]]
+    n = min(len(x) // WIN, cap)
+    return [x[i * WIN:(i + 1) * WIN] for i in range(n)]
+
+
+def assign_split(groups, strata, frac=FRAC, seed=0):
+    """0 = train, 1 = val, 2 = test. Делим группы, не окна.
+
+    Раскладываем группы внутри каждой страты отдельно, а не по всему набору
+    сразу: иначе маленькая страта целиком уедет в одну часть и val перестанет
+    её измерять. ESC-50 — это 2000 клипов против 180 тысяч у DADS, случайное
+    деление всего набора легко оставило бы его без val. Для cache_dads страта
+    это (источник, класс), для cache_hard — категория шума, потому что таблица
+    ложных срабатываний строится по категориям.
+
+    Групп в страте может быть мало (тишина стенда даёт всего две — по одной на
+    дрон). Тогда test остаётся без неё; что именно недопредставлено, печатает
+    coverage_report, чтобы это было видно, а не молча пропало.
+
+    Группы сильно разного размера: записи DroneAudioSet длятся от 30 до 152 с,
+    то есть дают от 60 до 304 окон. Раскладывать их случайно нельзя — на
+    страте из 12 групп val мог бы получить втрое больше положенной доли.
+    Поэтому группы идут от крупной к мелкой, и каждая попадает в ту часть, у
+    которой сейчас наибольший недобор по окнам. Seed влияет только на порядок
+    групп одинакового размера.
+    """
+    groups, strata = np.asarray(groups), np.asarray(strata)
+    split = np.full(len(groups), -1, np.int8)
+    rng = np.random.default_rng(seed)
+
+    for st in np.unique(strata):
+        sel = strata == st
+        gs, counts = np.unique(groups[sel], return_counts=True)
+        n = len(gs)
+        if n == 1:
+            n_va = n_te = 0
+        elif n == 2:
+            n_va, n_te = 1, 0            # хотя бы в val, иначе страту нечем мерить
+        else:
+            n_va = min(max(1, int(round(n * frac[1]))), n - 2)
+            n_te = min(max(1, int(round(n * frac[2]))), n - 1 - n_va)
+
+        # перемешиваем до сортировки: так группы равного размера получают
+        # воспроизводимый, но не зависящий от исходного порядка приоритет
+        perm = rng.permutation(n)
+        gs, counts = gs[perm], counts[perm]
+        order = np.argsort(-counts, kind="stable")
+
+        total = counts.sum()
+        want = [total * frac[0], total * frac[1], total * frac[2]]
+        have = [0.0, 0.0, 0.0]
+        slots = [n - n_va - n_te, n_va, n_te]
+        table = {}
+        for j in order:
+            p = max((q for q in (0, 1, 2) if slots[q] > 0),
+                    key=lambda q: want[q] - have[q])
+            table[gs[j].item()] = p
+            have[p] += counts[j]
+            slots[p] -= 1
+
+        idx = np.flatnonzero(sel)
+        split[idx] = [table[g] for g in groups[idx].tolist()]
+
+    assert (split >= 0).all(), "остались нераспределённые окна"
+    return split
+
+
+def coverage_report(split, strata, label=""):
+    """Печатает страты, которых нет в val или test. Молчаливая потеря страты —
+    это метрика, которая делает вид, что что-то измеряет."""
+    strata = np.asarray(strata)
+    missing = {1: [], 2: []}
+    for st in np.unique(strata):
+        for part in (1, 2):
+            if not ((strata == st) & (split == part)).any():
+                missing[part].append(str(st))
+    for part, nm in ((1, "val"), (2, "test")):
+        if missing[part]:
+            print(f"  {label}нет в {nm} ({len(missing[part])}): "
+                  f"{', '.join(sorted(missing[part])[:12])}"
+                  f"{' …' if len(missing[part]) > 12 else ''}")
+    return missing
+
+
+# ------------------------------------------------------------------- части
+
+def _key(src, i):
+    return f"{src}_{i:04d}"
+
+
+# Мелкие источники первыми: ошибка схемы вылезет за минуту, а не за час.
+ORDER = (SRC_ESC, SRC_URBAN, SRC_DAS, SRC_DADS)
+
+
+def listing():
+    """Все шарды всех источников как (src, индекс, путь). Ходит в сеть."""
+    return [(src, i, path) for src in ORDER
+            for i, path in enumerate(S.shards(src))]
+
+
+def _todo(manifest, all_shards):
+    """Шарды, которых ещё нет в манифесте. Чистая функция, сеть не трогает."""
+    done = set((manifest or {}).get("done", []))
+    return [(src, i, p) for src, i, p in all_shards if _key(src, i) not in done]
+
+
+def _dest(rec):
+    """Категория есть — значит негатив для таблицы ложных срабатываний."""
+    return "cache_hard" if rec.cat is not None else "cache_dads"
+
+
+def _write_part(key, buf):
+    """Один шард — свои .bin и .npz на каждый кэш. Части неизменяемы, поэтому
+    выгружаются на HF один раз и переживают обрыв сессии."""
+    written = []
+    for cache, d in buf.items():
+        if not d["y"]:
+            continue
+        pd = os.path.join(PARTS, cache)
+        os.makedirs(pd, exist_ok=True)
+        bin_p = os.path.join(pd, key + ".bin")
+        with open(bin_p, "wb") as f:
+            f.write(np.concatenate(d["w"]).tobytes())
+        np.savez(os.path.join(pd, key + ".npz"),
+                 y=np.array(d["y"], np.int8),
+                 group=np.array(d["group"], np.int64),
+                 src=np.array(d["src"], np.int8),
+                 cat=np.array(d["cat"]))
+        written.append((cache, key))
+    return written
+
+
+def _empty_buf():
+    return {c: {"w": [], "y": [], "group": [], "src": [], "cat": []} for c in CACHES}
+
+
+def collect(upload_parts=True, limit=None):
+    """Считает недостающие шарды в parts/. Возвращает манифест."""
+    manifest = hub.read_json("manifest.json") or {"done": []}
+    todo = _todo(manifest, listing())
+    if limit:
+        todo = todo[:limit]
+    print(f"шардов к обработке: {len(todo)}  (готово ранее: {len(manifest['done'])})")
+
+    for n, (src, i, path) in enumerate(todo, 1):
+        key = _key(src, i)
+        buf = _empty_buf()
+        for rec in S.read_shard(src, path):
+            d = buf[_dest(rec)]
+            for w in windows(rec.audio, CAP[(rec.src, rec.label)]):
+                d["w"].append((w * 32767).astype(np.int16))
+                d["y"].append(rec.label)
+                d["group"].append(rec.group)
+                d["src"].append(rec.src)
+                d["cat"].append(rec.cat or "")
+        for cache, k in _write_part(key, buf):
+            if upload_parts:
+                for ext in (".bin", ".npz"):
+                    hub.push(os.path.join(PARTS, cache, k + ext),
+                             f"parts/{cache}/{k}{ext}")
+        manifest["done"].append(key)
+        hub.write_json(manifest, "manifest.json")
+        print(f"  [{n}/{len(todo)}] {S.NAMES[src]} шард {i}  "
+              f"dads={len(buf['cache_dads']['y'])} hard={len(buf['cache_hard']['y'])}",
+              flush=True)
+    return manifest
+
+
+def _local_parts(cache):
+    pd = os.path.join(PARTS, cache)
+    if not os.path.isdir(pd):
+        return set()
+    return {f[:-4] for f in os.listdir(pd) if f.endswith(".npz")}
+
+
+def assemble(upload=True, manifest=None):
+    """Склеивает части в кэш, считает сплит, кладёт meta.npz.
+
+    Что есть на диске, определяет каталог parts/, а не манифест: иначе сборка
+    зависела бы от сети там, где все части уже лежат рядом. Манифест нужен для
+    другого — после обрыва сессии Colab он говорит, какие части были посчитаны
+    в прошлый раз и лежат на HF, чтобы дотянуть их, а не считать заново.
+
+    Порядок склейки — сортировка ключей, чтобы кэш побайтово воспроизводился
+    при повторной сборке и индексы в meta соответствовали windows.bin.
+    """
+    if manifest is None:
+        manifest = hub.read_json("manifest.json") or {"done": []}
+    for cache in CACHES:
+        pd = os.path.join(PARTS, cache)
+        keys = _local_parts(cache)
+        for k in sorted(set(manifest.get("done", [])) - keys):
+            # Шард мог не дать частей в этот кэш (шарды DADS не дают cache_hard),
+            # поэтому отсутствие на HF — норма, а не ошибка.
+            if hub.exists(f"parts/{cache}/{k}.npz"):
+                os.makedirs(pd, exist_ok=True)
+                for ext in (".bin", ".npz"):
+                    hub.pull(f"parts/{cache}/{k}{ext}", os.path.join(pd, k + ext))
+                keys.add(k)
+        keys = sorted(keys)
+        if not keys:
+            print(f"{cache}: частей нет, пропускаю")
+            continue
+
+        out = os.path.join(ROOT, cache)
+        os.makedirs(out, exist_ok=True)
+        y, g, src, cat = [], [], [], []
+        with open(os.path.join(out, "windows.bin"), "wb") as f:
+            for k in keys:
+                with open(os.path.join(pd, k + ".bin"), "rb") as pf:
+                    f.write(pf.read())
+                m = np.load(os.path.join(pd, k + ".npz"), allow_pickle=True)
+                y.append(m["y"]); g.append(m["group"])
+                src.append(m["src"]); cat.append(m["cat"])
+        y = np.concatenate(y); g = np.concatenate(g)
+        src = np.concatenate(src); cat = np.concatenate(cat)
+
+        n_bytes = os.path.getsize(os.path.join(out, "windows.bin"))
+        assert n_bytes == len(y) * WIN * 2, \
+            f"{cache}: {n_bytes} байт против {len(y)} меток — части рассинхронизованы"
+
+        strata = cat if cache == "cache_hard" else np.char.add(
+            src.astype(str), np.char.add("_", y.astype(str)))
+        split = assign_split(g, strata)
+
+        meta = dict(y=y, group=g, src=src, split=split,
+                    synth=np.zeros(len(y), bool),
+                    n=np.int64(len(y)), win=np.int64(WIN))
+        if cache == "cache_hard":
+            meta["cat"] = cat
+            meta["hard"] = np.array(sorted(HARD))
+        np.savez(os.path.join(out, "meta.npz"), **meta)
+
+        print(f"\n{cache}: окон {len(y)}  ({len(y)*WIN*2/1e9:.2f} ГБ)  "
+              f"групп {len(np.unique(g))}  частей {len(keys)}")
+        for part, nm in enumerate(("train", "val", "test")):
+            sel = split == part
+            print(f"  {nm:5s} {int(sel.sum()):>7}  дрон {int(y[sel].sum()):>7}")
+        coverage_report(split, strata, label=f"{cache}: ")
+        if upload:
+            hub.push(out, f"cache/{cache}")
+
+
+def main(upload=True, limit=None):
+    hub.ensure_repo()
+    manifest = collect(upload_parts=upload, limit=limit)
+    assemble(upload=upload, manifest=manifest)
+
+
+def selfcheck():
+    # --- нарезка окон: поведение как в prep_dads.py
+    assert len(windows(np.zeros(WIN), 4)) == 1
+    assert len(windows(np.zeros(WIN * 10), 4)) == 4
+    assert len(windows(np.zeros(WIN * 10), 1)) == 1
+    (w,) = windows(np.arange(100, dtype=np.float32), 4)
+    assert len(w) == WIN and w[100] == 0        # зациклено, а не дополнено нулями
+
+    # --- сплит: группа целиком в одной части
+    rng = np.random.default_rng(0)
+    g = rng.integers(0, 300, 5000)
+    strata = (g % 4).astype(str)
+    sp = assign_split(g, strata)
+    assert sp.dtype == np.int8 and len(sp) == len(g)
+    for gid in np.unique(g):
+        assert len(np.unique(sp[g == gid])) == 1, f"группа {gid} разорвана между сплитами"
+
+    # --- пропорции близки к заданным
+    for part, want in enumerate(FRAC):
+        got = (sp == part).mean()
+        assert abs(got - want) < 0.10, f"часть {part}: {got:.2f} против {want}"
+
+    # --- каждая страта представлена во всех трёх частях, когда групп хватает
+    for part in (0, 1, 2):
+        assert set(np.unique(strata[sp == part])) == set(np.unique(strata)), \
+            f"часть {part} потеряла страту"
+    assert not any(coverage_report(sp, strata).values())
+
+    # --- детерминированность
+    assert (assign_split(g, strata) == sp).all()
+
+    # --- пропорции держатся, когда группы РАЗНОГО размера.
+    # Именно это ломалось при случайной раскладке: 12 групп по 60-304 окна
+    # давали val втрое больше положенного.
+    gg = np.repeat(np.arange(12), np.array([304, 280, 250, 210, 190, 170,
+                                            150, 130, 110, 90, 75, 60]))
+    sp2 = assign_split(gg, np.zeros(len(gg), int))
+    for part, want in enumerate(FRAC):
+        got = (sp2 == part).mean()
+        assert abs(got - want) < 0.06, f"часть {part}: {got:.3f} против {want}"
+    for gid in np.unique(gg):
+        assert len(np.unique(sp2[gg == gid])) == 1
+
+    # --- самая крупная группа не обязана оказаться в train, но train не пуст
+    assert (sp2 == 0).sum() > (sp2 == 1).sum() > 0
+
+    # --- вырожденные страты: одна группа только в train, две — train и val
+    one = assign_split(np.zeros(10, int), np.zeros(10, int))
+    assert set(one.tolist()) == {0}
+    two = assign_split(np.repeat([1, 2], 5), np.zeros(10, int))
+    assert set(two.tolist()) == {0, 1}, "две группы должны дать train и val"
+    three = assign_split(np.repeat([1, 2, 3], 5), np.zeros(15, int))
+    assert set(three.tolist()) == {0, 1, 2}, "три группы должны покрыть все части"
+
+    # --- страта из двух групп попадает в отчёт как отсутствующая в test
+    miss = coverage_report(two, np.zeros(10, int))
+    assert miss[2] and not miss[1]
+
+    # --- ключи частей стабильны и сортируемы (от них зависит порядок склейки)
+    assert _key(SRC_ESC, 0) == "3_0000" and _key(SRC_DADS, 12) == "0_0012"
+    assert sorted([_key(0, 10), _key(0, 9), _key(0, 100)]) == ["0_0009", "0_0010", "0_0100"]
+
+    # --- манифест: докачка считает только недостающее
+    shards_ = [(SRC_ESC, 0, "a.parquet"), (SRC_ESC, 1, "b.parquet"),
+               (SRC_DADS, 0, "c.parquet")]
+    assert _todo(None, shards_) == shards_, "пустой манифест — считаем всё"
+    assert _todo({"done": []}, shards_) == shards_
+    rest = _todo({"done": [_key(SRC_ESC, 0)]}, shards_)
+    assert rest == shards_[1:], rest
+    assert _todo({"done": [_key(s, i) for s, i, _ in shards_]}, shards_) == [], \
+        "всё готово — считать нечего"
+
+    # --- HARD не содержит категорий, которых нет ни в одном источнике
+    known = {
+        "dog", "rooster", "pig", "cow", "frog", "cat", "hen", "insects", "sheep",
+        "crow", "rain", "sea_waves", "crackling_fire", "crickets", "chirping_birds",
+        "water_drops", "wind", "pouring_water", "toilet_flush", "thunderstorm",
+        "crying_baby", "sneezing", "clapping", "breathing", "coughing", "footsteps",
+        "laughing", "brushing_teeth", "snoring", "drinking", "door_knock",
+        "mouse_click", "keyboard", "door_wood_creaks", "can_opening",
+        "washing_machine", "vacuum_cleaner", "clock_alarm", "clock_tick",
+        "glass_breaking", "helicopter", "chainsaw", "siren", "car_horn", "engine",
+        "train", "church_bells", "airplane", "fireworks", "hand_saw",
+        "air_conditioner", "children_playing", "dog_bark", "drilling",
+        "engine_idling", "gun_shot", "jackhammer", "street_music",
+        "drone_rig_silence",
+    }
+    assert HARD <= known, f"опечатка в HARD: {HARD - known}"
+
+    # --- маршрутизация по кэшам
+    R = S.Rec
+    assert _dest(R(None, 0, 1, None, SRC_DADS)) == "cache_dads"
+    assert _dest(R(None, 0, 1, None, SRC_DAS)) == "cache_dads"
+    assert _dest(R(None, 0, 0, "wind", SRC_ESC)) == "cache_hard"
+    assert _dest(R(None, 0, 0, "drone_rig_silence", SRC_DAS)) == "cache_hard"
+
+    # --- у каждой пары (источник, класс) есть кэп
+    for src in (SRC_DADS, SRC_DAS, SRC_URBAN, SRC_ESC):
+        for lab in (0, 1):
+            if src in (SRC_URBAN, SRC_ESC) and lab == 1:
+                continue                        # эти источники дают только негативы
+            assert (src, lab) in CAP, f"нет кэпа для ({src}, {lab})"
+
+    print("selfcheck ok")
+
+
+if __name__ == "__main__":
+    selfcheck() if "--selfcheck" in sys.argv else main()

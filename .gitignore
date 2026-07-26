@@ -8,3 +8,4 @@ archive/cache_kaggle/
 __pycache__/
 *.pyc
 evalx/*.npz
+parts/

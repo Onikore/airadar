@@ -17,6 +17,12 @@ import json
 import numpy as np
 import torch
 import torch.nn as nn
+
+try:                              # прогресс по батчам — необязательная зависимость,
+    from tqdm import tqdm         # без неё поведение не меняется, просто без бара
+    _HAS_TQDM = True
+except ImportError:
+    _HAS_TQDM = False
 import torch.nn.functional as F
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.metrics import roc_auc_score
@@ -451,7 +457,14 @@ def main(epochs=30, bs=256, lr=3e-4, use_synth=False, model_cls=None,
     for ep in range(start_ep, epochs):
         perm = np.random.permutation(len(tr))
         tot, n = 0.0, 0
-        for i in range(0, len(perm) - bs + 1, bs):
+        starts = range(0, len(perm) - bs + 1, bs)
+        # tqdm необязателен: если пакета нет, поведение не меняется, просто
+        # без бара. При выводе в файл (tee) \r считается .NET-ридером за конец
+        # строки, поэтому Get-Content -Wait в PowerShell покажет прокручивающийся
+        # список обновлений, а не одну перезаписываемую строку — это нормально.
+        bar = tqdm(starts, desc=f"эпоха {ep+1}/{epochs}", unit="батч",
+                  leave=False) if _HAS_TQDM else starts
+        for i in bar:
             b = np.sort(perm[i:i + bs])          # сортировка = локальность в memmap
             wav = torch.from_numpy(np.ascontiguousarray(X[tr[b]])).to(DEV).float() / 32768.0
             lab = torch.from_numpy(ytr[b]).to(DEV)
@@ -467,6 +480,8 @@ def main(epochs=30, bs=256, lr=3e-4, use_synth=False, model_cls=None,
             opt.step()
             sched.step()
             tot += loss.item(); n += 1
+            if _HAS_TQDM:
+                bar.set_postfix(loss=f"{tot/n:.4f}")
         m = evaluate(model, logmel, Xva, yva, sva)
         # Отбираем чекпоинт по AUC "дрон против механического шума и погоды",
         # а не по AUC на val DADS: там негативы — лай и звонки, метрика упирается

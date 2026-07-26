@@ -50,7 +50,60 @@ def _api():
 
 
 def ensure_repo():
-    _api().create_repo(REPO, repo_type=REPO_TYPE, private=True, exist_ok=True)
+    """Создаёт приватный репозиторий, если его ещё нет.
+
+    Существование проверяется ДО create_repo: у fine-grained токена без права
+    создавать репозитории create_repo отдаёт 403 даже с exist_ok=True — HF
+    проверяет разрешение раньше, чем существование. То есть на готовом
+    репозитории вызов падал бы там, где падать нечему.
+    """
+    api = _api()
+    if api.repo_exists(REPO, repo_type=REPO_TYPE):
+        return
+    api.create_repo(REPO, repo_type=REPO_TYPE, private=True, exist_ok=True)
+
+
+def check_access():
+    """Проверяет, что токен действительно может писать в репозиторий.
+
+    Нужна затем, что препроцессинг идёт 40 минут, а первая выгрузка случается
+    в конце первого шарда. Узнать про нехватку прав лучше на второй секунде.
+
+    Возвращает имя пользователя. Падает с внятным сообщением, а не 403 из
+    глубины httpx.
+    """
+    api = _api()
+    try:
+        me = api.whoami()
+    except Exception as e:
+        raise RuntimeError(f"токен HF недействителен: {e}") from e
+
+    name = me.get("name")
+    tok = me.get("auth", {}).get("accessToken", {})
+    fg = tok.get("fineGrained")
+    owner = REPO.split("/")[0]
+    if fg is not None:
+        scoped = {s["entity"]["name"]: s["permissions"] for s in fg.get("scoped", [])}
+        if "repo.write" not in scoped.get(owner, []):
+            raise RuntimeError(
+                f"токен «{tok.get('displayName')}» (пользователь {name}) не может "
+                f"писать в «{owner}»: выписан на {sorted(scoped) or 'ничего'}.\n"
+                f"Нужен scope repo.write на «{owner}». Заведите токен на "
+                f"huggingface.co/settings/tokens: тип Fine-grained, владелец "
+                f"{owner}, галочка «Write access to contents/settings of all "
+                f"repos», затем обновите секрет HF_TOKEN в Colab.")
+
+    ensure_repo()
+    probe = f"runs/_access_{name}.json"
+    write_json({"проверка": "доступ на запись"}, probe)
+    if read_json(probe) is None:
+        raise RuntimeError("запись прошла, но чтение вернуло пусто — "
+                           "проверьте права токена на чтение")
+    try:
+        api.delete_file(probe, REPO, repo_type=REPO_TYPE)
+    except Exception:
+        pass                        # не критично: файл крошечный
+    return name
 
 
 def exists(remote):

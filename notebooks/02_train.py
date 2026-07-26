@@ -31,6 +31,10 @@ if not os.path.isdir("/content/airadar"):
 # %%
 import hub
 
+# Проверяем права до скачивания кэша: обучение всё равно упрётся в выгрузку
+# после первой эпохи, а это уже потраченное GPU-время.
+print("токен принадлежит:", hub.check_access())
+
 for d in ("cache_dads", "cache_hard"):
     if os.path.exists(f"{d}/meta.npz"):
         print(f"{d}: уже на диске")

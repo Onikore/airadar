@@ -160,5 +160,17 @@ def regroup(X, group):
     return out
 
 
+def hard_categories():
+    """16 трудных категорий (механический гул и погода) из meta["hard"].
+
+    Список зафиксирован при сборке кэша, а не продублирован здесь: копия
+    разъехалась бы с данными при первой же пересборке, и метрика молча
+    начала бы считаться по другому пулу.
+    """
+    meta = np.load(os.path.join(ROOT, "cache_hard", "meta.npz"),
+                   allow_pickle=True)
+    return meta["hard"]
+
+
 if __name__ == "__main__":
     selfcheck() if "--selfcheck" in sys.argv else sys.exit("нечего запускать")

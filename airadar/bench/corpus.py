@@ -90,11 +90,14 @@ def seam_mask(n, seams, context_s, hop_s, sr=SR):
 
 
 def read_wav_mono16k(path):
-    w = wave.open(path)
-    if w.getframerate() != SR or w.getnchannels() != 1:
-        raise ValueError(f"{path}: нужен моно {SR} Гц, "
-                         f"а тут {w.getnchannels()} кан. {w.getframerate()} Гц")
-    raw = np.frombuffer(w.readframes(w.getnframes()), np.int16)
+    with wave.open(path) as w:
+        if w.getframerate() != SR or w.getnchannels() != 1:
+            raise ValueError(f"{path}: нужен моно {SR} Гц, "
+                             f"а тут {w.getnchannels()} кан. {w.getframerate()} Гц")
+        if w.getsampwidth() != 2:
+            raise ValueError(f"{path}: нужно 16 бит (2 байта/отсчёт), "
+                             f"а тут {w.getsampwidth() * 8} бит")
+        raw = np.frombuffer(w.readframes(w.getnframes()), np.int16)
     return raw.astype(np.float32) / 32768.0
 
 

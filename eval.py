@@ -91,8 +91,19 @@ def hard_negatives(model, logmel, thr, thr_name):
     return {c: float(fa) for c, fa, _ in rows}
 
 
+def _ckpt_name():
+    """Имя файла чекпоинта в models/ — первый небиочный аргумент командной
+    строки, иначе dronenet.pt по умолчанию (поведение не меняется)."""
+    for a in sys.argv[1:]:
+        if not a.startswith("--"):
+            return a
+    return "dronenet.pt"
+
+
 def main():
-    ckpt = torch.load(os.path.join(ROOT, "models", "dronenet.pt"), map_location=DEV, weights_only=False)
+    name = _ckpt_name()
+    print(f"чекпоинт: models/{name}")
+    ckpt = torch.load(os.path.join(ROOT, "models", name), map_location=DEV, weights_only=False)
     model = DroneNet().to(DEV)
     model.load_state_dict(ckpt["model"])
     model.eval()
@@ -125,9 +136,10 @@ def main():
     if op:
         res["hard_negatives"] = hard_negatives(model, logmel, op["threshold"], "FAR 1%")
 
-    with open(os.path.join(ROOT, "eval.json"), "w") as f:
+    out_name = "eval.json" if name == "dronenet.pt" else f"eval_{os.path.splitext(name)[0]}.json"
+    with open(os.path.join(ROOT, out_name), "w") as f:
         json.dump(res, f, indent=2, ensure_ascii=False)
-    print("\nсохранено: eval.json")
+    print(f"\nсохранено: {out_name}")
 
 
 def selfcheck():

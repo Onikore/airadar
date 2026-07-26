@@ -1,0 +1,12 @@
+ep01 loss 0.3480  auc 0.9910  auc_hard 0.9920  FAR_hard@r90 1.6%  recall_поле 0.0% 0.0%  <- saved
+ep02 loss 0.2026  auc 0.9984  auc_hard 0.9975  FAR_hard@r90 0.3%  recall_поле 0.0% 4.7%  <- saved
+ep03 loss 0.1703  auc 0.9983  auc_hard 0.9966  FAR_hard@r90 0.4%  recall_поле 0.0% 1.0%
+ep04 loss 0.1545  auc 0.9987  auc_hard 0.9967  FAR_hard@r90 0.5%  recall_поле 0.0% 1.6%
+ep05 loss 0.1401  auc 0.9992  auc_hard 0.9979  FAR_hard@r90 0.4%  recall_поле 0.0% 3.1%  <- saved
+ep06 loss 0.1313  auc 0.9990  auc_hard 0.9975  FAR_hard@r90 0.2%  recall_поле 0.0% 3.1%
+ep07 loss 0.1232  auc 0.9977  auc_hard 0.9963  FAR_hard@r90 0.0%  recall_поле 0.0% 5.8%
+ep08 loss 0.1166  auc 0.9989  auc_hard 0.9978  FAR_hard@r90 0.0%  recall_поле 0.0% 1.0%
+ep09 loss 0.1130  auc 0.9992  auc_hard 0.9983  FAR_hard@r90 0.0%  recall_поле 0.0% 1.0%  <- saved
+ep10 loss 0.1077  auc 0.9993  auc_hard 0.9981  FAR_hard@r90 0.0%  recall_поле 0.0% 3.1%
+ep11 loss 0.1041  auc 0.9995  auc_hard 0.9987  FAR_hard@r90 0.0%  recall_поле 0.0% 4.7%  <- saved
+ep12 loss 0.1015  auc 0.9993  auc_hard 0.9984  FAR_hard@r90 0.0%  recall_поле 0.0% 9.4%

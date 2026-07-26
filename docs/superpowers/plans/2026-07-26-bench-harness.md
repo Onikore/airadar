@@ -1326,6 +1326,7 @@ git commit -m "bench: ошибка переноса порога и дрейф �
 **Interfaces:**
 - Consumes: всё из Task 1–7
 - Produces:
+  - `corpus.hard_categories() -> np.ndarray` — 16 трудных категорий из `meta["hard"]` (дописывается в `airadar/bench/corpus.py`)
   - `run_bench(scorer, name: str, seed: int = 0) -> dict` — полный отчёт
   - `write_report(rep: dict, out_dir: str = "bench_out") -> tuple[str, str]` — пути к JSON и markdown
   - CLI: `python cli/bench.py --model models/dronenet_local.pt --name dronenet_local`
@@ -1374,6 +1375,23 @@ git add cli/selfcheck.py
 git commit -m "cli: прогон всех selfcheck пакета одной командой"
 ```
 
+- [ ] **Step 2b: Дописать `hard_categories()` в `airadar/bench/corpus.py`**
+
+```python
+def hard_categories():
+    """16 трудных категорий (механический гул и погода) из meta["hard"].
+
+    Список зафиксирован при сборке кэша, а не продублирован здесь: копия
+    разъехалась бы с данными при первой же пересборке, и метрика молча
+    начала бы считаться по другому пулу.
+    """
+    meta = np.load(os.path.join(ROOT, "cache_hard", "meta.npz"),
+                   allow_pickle=True)
+    return meta["hard"]
+```
+
+Проверить: `python -c "import sys; sys.path.insert(0,'.'); from airadar.bench.corpus import hard_categories; print(len(hard_categories()), sorted(hard_categories())[:4])"` — ожидается `16` и первые категории по алфавиту.
+
 - [ ] **Step 3: Написать report.py**
 
 ```python
@@ -1405,7 +1423,13 @@ def run_bench(scorer, name, seed=0):
     #    смежны встык), и только потом клипы сшиваются кроссфейдом. Склейка
     #    напрямую из 0.5-секундных окон дала бы стык каждые 0.45 с, и при
     #    контексте 0.5 с его задевало бы каждое окно.
-    hard, cats, grp = corpus.hard_holdout()
+    # Фильтр по трудным категориям обязателен. В cache_hard 58 категорий, а
+    # трудных (механический гул и погода) — 16, список лежит в meta["hard"].
+    # Без фильтра рабочая точка считалась бы по пулу, где собственно моторных
+    # и винтовых звуков единицы процентов, а остальное — лай, плач и стройка.
+    # Такое среднее насыщается по построению, и именно на это указывает
+    # docs/metrics-plan.md §0.5.
+    hard, cats, grp = corpus.hard_holdout(cat_filter=corpus.hard_categories())
     clips = corpus.regroup(hard, grp)
     track, seams = corpus.stitch(clips)
     mask = corpus.seam_mask(_n(scorer, len(track)), seams,

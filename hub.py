@@ -18,6 +18,16 @@ import json
 REPO = "Onikore/airadar-hub"
 REPO_TYPE = "dataset"
 
+# Прогресс-бары huggingface_hub («Processing Files», «New Data Upload») печатают
+# несколько строк на каждый push. При выгрузке после каждой эпохи (см. train.py)
+# это превращает лог обучения в 4-5 строк технического шума на строку метрик.
+# Сама выгрузка при этом не меняется — только вывод.
+try:
+    from huggingface_hub.utils import disable_progress_bars
+    disable_progress_bars()
+except ImportError:
+    pass
+
 
 def token():
     t = os.environ.get("HF_TOKEN")
@@ -128,6 +138,30 @@ def exists(remote, files=None):
     return r in files or any(f.startswith(r + "/") for f in files)
 
 
+def _is_dir(r):
+    """Каталог отличается от файла отсутствием расширения — в этом
+    репозитории все файлы его имеют (.npz, .bin, .pt, .log, .jsonl, .json,
+    .wav), поэтому эвристика надёжна для всех путей, что здесь встречаются."""
+    return os.path.splitext(r)[1] == ""
+
+
+def _dir_pull_paths(r, local):
+    """Пути для скачивания каталога: (служебный staging, ожидаемый src внутри
+    него после snapshot_download).
+
+    Вынесено отдельной чистой функцией — без сети, без файловой системы —
+    чтобы поведение проверялось в selfcheck напрямую, а не только в живом pull.
+
+    snapshot_download кладёт файлы внутри local_dir, воспроизводя полный путь
+    репозитория: allow_patterns="cache/cache_dads/*" даст
+    staging/cache/cache_dads/…, а не staging/…, поэтому «ожидаемый src» — это
+    staging плюс сегменты r.
+    """
+    staging = local + ".pull"
+    src = os.path.join(staging, *r.split("/"))
+    return staging, src
+
+
 def push(local, remote):
     api, r = _api(), _norm(remote)
     if os.path.isdir(local):
@@ -139,15 +173,39 @@ def push(local, remote):
 
 
 def pull(remote, local):
-    """Каталог отличается от файла отсутствием расширения — в этом репозитории
-    все файлы его имеют (.npz, .bin, .pt, .log, .jsonl, .json, .wav)."""
+    """Скачивает файл или каталог. СОДЕРЖИМОЕ remote оказывается в local.
+
+    Каталог отличается от файла отсутствием расширения — в этом репозитории все
+    файлы его имеют (.npz, .bin, .pt, .log, .jsonl, .json, .wav).
+
+    Для каталога приходится доделывать руками: snapshot_download воспроизводит
+    внутри local_dir полный путь репозитория, то есть pull('cache/cache_dads',
+    '.') кладёт файлы в ./cache/cache_dads, а вызывающий ждёт их в ./cache_dads
+    — на этом обучение и падало с FileNotFoundError. Качаем в служебный каталог
+    рядом и переносим листовой каталог на место: переименование внутри одной
+    файловой системы, без копирования шести гигабайтов.
+    """
     from huggingface_hub import hf_hub_download, snapshot_download
     import shutil
     r = _norm(remote)
-    if os.path.splitext(r)[1] == "":
-        return snapshot_download(REPO, repo_type=REPO_TYPE, token=token(),
-                                 allow_patterns=f"{r}/*", local_dir=local)
-    os.makedirs(os.path.dirname(os.path.abspath(local)), exist_ok=True)
+    if _is_dir(r):
+        local = os.path.abspath(local)
+        os.makedirs(os.path.dirname(local) or ".", exist_ok=True)
+        staging, src_expected = _dir_pull_paths(r, local)
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            snapshot_download(REPO, repo_type=REPO_TYPE, token=token(),
+                              allow_patterns=f"{r}/*", local_dir=staging)
+            src = src_expected
+            if not os.path.isdir(src):
+                raise FileNotFoundError(f"на HF нет каталога {r}")
+            if os.path.isdir(local):
+                shutil.rmtree(local)
+            os.replace(src, local)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        return local
+    os.makedirs(os.path.dirname(os.path.abspath(local)) or ".", exist_ok=True)
     p = hf_hub_download(REPO, r, repo_type=REPO_TYPE, token=token())
     shutil.copyfile(p, local)
     return local
@@ -207,6 +265,36 @@ def selfcheck():
         assert json.loads(raw) == {"b": 1, "a": [2, 3], "ключ": "значение"}
         assert "\n" in raw                      # с отступами, не одной строкой
         assert "ключ" in raw                    # кириллица не в \uXXXX
+
+    # --- каталог отличается от файла отсутствием расширения
+    assert _is_dir("cache/cache_dads") is True
+    assert _is_dir("field") is True
+    assert _is_dir("manifest.json") is False
+    assert _is_dir("cache/cache_dads/meta.npz") is False
+    assert _is_dir("runs/dronenet_hf/last.pt") is False
+
+    # --- ГЛАВНОЕ: содержимое remote должно лечь ПРЯМО в local, без
+    # промежуточного пути репозитория. Именно на этом обучение падало с
+    # FileNotFoundError: pull('cache/cache_dads', '.') клал файлы в
+    # ./cache/cache_dads вместо ./cache_dads, которого ждал train.py.
+    with tempfile.TemporaryDirectory() as d:
+        local = os.path.join(d, "cache_dads")
+        staging, src = _dir_pull_paths("cache/cache_dads", local)
+        # эмулируем результат snapshot_download: полный путь репозитория внутри staging
+        os.makedirs(src)
+        with open(os.path.join(src, "meta.npz"), "w") as f:
+            f.write("данные")
+        assert os.path.isdir(src), "путь src должен указывать внутрь staging"
+        os.replace(src, local)              # то же действие, что и в pull()
+        assert os.path.exists(os.path.join(local, "meta.npz")), \
+            "содержимое должно оказаться прямо в local"
+        assert not os.path.exists(os.path.join(local, "cache", "cache_dads")), \
+            "путь репозитория не должен дублироваться внутри local"
+
+    # простой путь (без вложенности) даёт src == staging/remote тем же способом
+    staging2, src2 = _dir_pull_paths("field", "/x/field")
+    assert staging2 == "/x/field.pull"
+    assert src2 == os.path.join("/x/field.pull", "field")
 
     print("selfcheck ok")
 

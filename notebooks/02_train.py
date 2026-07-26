@@ -47,14 +47,16 @@ for d in ("cache_dads", "cache_hard"):
     if os.path.exists(f"{d}/meta.npz"):
         print(f"{d}: уже на диске")
     else:
-        hub.pull(f"cache/{d}", ".")
+        hub.pull(f"cache/{d}", d)          # содержимое cache/<d> ложится в ./<d>
         print(f"{d}: скачан")
+    assert os.path.exists(f"{d}/meta.npz"), f"{d}/meta.npz не появился"
+    assert os.path.exists(f"{d}/windows.bin"), f"{d}/windows.bin не появился"
 
 if os.path.isdir("field") and os.listdir("field"):
     print("field:", sorted(os.listdir("field")))
 else:
     try:
-        hub.pull("field", ".")
+        hub.pull("field", "field")
         print("field:", sorted(os.listdir("field")))
     except Exception as e:
         print(f"полевых записей на HF нет ({e}) — recall_поле считаться не будет")

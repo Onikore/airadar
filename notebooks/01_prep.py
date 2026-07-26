@@ -136,7 +136,7 @@ if glob.glob("*.MOV") or glob.glob("*.mp4"):
     hub.push("field", "field")
     print("выгружено:", sorted(os.listdir("field")))
 else:
-    hub.pull("field", ".")
+    hub.pull("field", "field")
     print("новых видео нет, полевые записи взяты с HF:", sorted(os.listdir("field")))
 
 # %% [markdown]

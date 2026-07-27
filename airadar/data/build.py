@@ -22,22 +22,31 @@ def selfcheck():
     recs = [
         FakeRec(np.ones(100, np.float32), group=5, label=1, cat=None, src=0),
         FakeRec(np.zeros(50, np.float32), group=7, label=0, cat="wind", src=3),
+        # SRC_DAS отдельно: без него _domain могла бы перепутать ветки
+        # das_rig_/dads_block_ местами, а selfcheck этого бы не заметил
+        FakeRec(np.full(30, 2.0, np.float32), group=9, label=1, cat=None, src=1),
     ]
     with tempfile.TemporaryDirectory() as d:
         w = ClipWriter(os.path.join(d, "clips.bin"))
         rows, next_id = ingest_shard(iter(recs), w, next_clip_id=100)
         w.close()
 
-        assert next_id == 102, next_id
-        assert len(rows) == 2
+        assert next_id == 103, next_id
+        assert len(rows) == 3
         assert rows[0]["clip_id"] == 100 and rows[1]["clip_id"] == 101
+        assert rows[2]["clip_id"] == 102
         assert rows[0]["offset"] == 0 and rows[0]["n_samples"] == 100
         assert rows[1]["offset"] == 100 and rows[1]["n_samples"] == 50   # встык
+        assert rows[2]["offset"] == 150 and rows[2]["n_samples"] == 30   # встык
         assert rows[0]["label"] == 1 and rows[0]["category"] is None
         assert rows[1]["label"] == 0 and rows[1]["category"] == "wind"
+        assert rows[2]["label"] == 1 and rows[2]["category"] is None
         assert rows[0]["domain"] == "dads_block_5", rows[0]["domain"]
         assert rows[1]["domain"] == "scene_7", rows[1]["domain"]
+        assert rows[2]["domain"] == "das_rig_9", rows[2]["domain"]
         assert rows[0]["synth"] is False
+        assert rows[1]["synth"] is False
+        assert rows[2]["synth"] is False
 
         for r in rows:
             validate_row(r)                # строки обязаны проходить схему

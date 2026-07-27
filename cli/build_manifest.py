@@ -55,26 +55,45 @@ def _parts_on_disk():
             if f.endswith(".parquet")}
 
 
-def _drop_stale(old_ver):
-    """Части чужой версии схемы не пригодятся никогда — колонки не совпадают.
+def _park_stale(old_ver):
+    """Убирает сборку чужой версии схемы в сторону — переносом, не удалением.
 
-    Удаляются вместе с clips.bin: смещения в нём адресуются только через
-    части, и оставленный файл ушёл бы в mode="ab" под новые смещения. Тот же
-    приём, что _local_done в prep_hf.py применяет к своим частям.
+    Части чужой версии не пригодятся никогда (колонки не совпадают), а
+    оставленный рядом clips.bin ушёл бы в mode="ab" под новые смещения, то
+    есть прямиком в C1. Убрать их с путей кода обязательно — но не обязательно
+    стереть.
+
+    Триггер здесь — событие КОДА (переключились на ревизию с другой
+    MANIFEST_VERSION), а не дефект данных. Сюда же попадают откат на старую
+    ревизию поверх завершённой сборки и любой чекпоинт до появления поля "ver".
+    Стереть в этот момент весь собранный корпус — ошибка невосстановимая;
+    перенос убирает файлы из _reconcile, _assemble и ClipWriter ровно так же
+    полно, но остаётся исправимым. Тот же принцип, что и с пустым шардом: не
+    выбрасывать молча, а зафиксировать и оставить решение человеку.
     """
-    n = 0
-    for k in sorted(_parts_on_disk()):
-        os.remove(os.path.join(PARTS_DIR, k + ".parquet"))
+    base = os.path.join(OUT_DIR, f"stale_v{old_ver}")
+    dst, n = base, 1
+    while os.path.exists(dst):          # прежнюю парковку не затираем
         n += 1
-    for p in (CLIPS_BIN, MANIFEST_PARQUET):
+        dst = f"{base}_{n}"
+    os.makedirs(dst)
+
+    moved = []
+    for k in sorted(_parts_on_disk()):
+        name = k + ".parquet"
+        os.replace(os.path.join(PARTS_DIR, name), os.path.join(dst, name))
+        moved.append(f"parts/{name}")
+    for p in (CLIPS_BIN, MANIFEST_PARQUET, CHECKPOINT_JSON):
         if os.path.exists(p):
-            os.remove(p)
-    print(f"  чекпоинт версии {old_ver}, код версии {MANIFEST_VERSION}: удалено "
-          f"частей {n}, clips.bin и manifest.parquet тоже — сборка начнётся заново")
+            os.replace(p, os.path.join(dst, os.path.basename(p)))
+            moved.append(os.path.basename(p))
+    print(f"  чекпоинт версии {old_ver}, код версии {MANIFEST_VERSION}: "
+          f"перенесено {len(moved)} файлов в {dst}")
+    print(f"  ({', '.join(moved)}) — сборка начнётся заново, старое не удалено")
 
 
 def _load_checkpoint():
-    """Читает чекпоинт; при чужой версии схемы обнуляет его вместе с данными.
+    """Читает чекпоинт; при чужой версии схемы убирает сборку в сторону.
 
     Формат: {"ver", "shards": {ключ: строк}, "next_clip_id", "n_samples_total"}.
 
@@ -102,7 +121,7 @@ def _load_checkpoint():
                  f"сам чекпоинт — и собрать заново.")
     ver = int(ck.get("ver", 0))
     if ver != MANIFEST_VERSION:
-        _drop_stale(ver)
+        _park_stale(ver)
         return _empty_checkpoint()
     return ck
 
@@ -131,15 +150,24 @@ def _reconcile(ck):
     оставались и попадали в итоговый манифест, и их строки начинали адресовать
     ЧУЖОЕ аудио. Молча: audit() на таком манифесте отвечал ok: true.
 
-    Чинить это автоматически нечем — состав обрезанного файла восстановить
-    неоткуда. Поэтому расхождение здесь останавливает прогон с объяснением, а
-    решение принимает человек.
+    Восстановимый случай ровно один: clips.bin ДЛИННЕЕ обещанного при точно
+    совпавшем составе частей. Так выглядит прерванный шард (Ctrl-C, кончившееся
+    место, OOM, падение декодера): байты доходят до файла по ходу записи, а
+    n_samples_total растёт только по завершении целого шарда. Хвост за
+    n_samples_total по построению не адресован ни одной готовой частью — та,
+    что писалась, в чекпоинт так и не попала, — поэтому обрезка до обещанного
+    размера ничего учтённого не теряет. Обрывать на этом многодневный прогон
+    было бы дороже самой находки.
+
+    Остальное автоматически чинить нечем: если файл КОРОЧЕ обещанного, данных
+    не хватает, а не лишку, и состав обрезанного восстановить неоткуда.
     """
     shards = dict(ck.get("shards") or {})
     parts = _parts_on_disk()
     expected = {k for k, n in shards.items() if n > 0}
     have = os.path.getsize(CLIPS_BIN) if os.path.exists(CLIPS_BIN) else 0
     want = 4 * int(ck.get("n_samples_total", 0))      # float32 = 4 байта
+    tail = have - want
 
     bad = []
     missing, extra = sorted(expected - parts), sorted(parts - expected)
@@ -147,10 +175,15 @@ def _reconcile(ck):
         bad.append(f"чекпоинт числит готовыми части, которых нет на диске: {missing}")
     if extra:
         bad.append(f"на диске есть части, о которых чекпоинт не знает: {extra}")
-    if have != want:
-        bad.append(f"clips.bin — {have} байт, чекпоинт обещает {want} "
-                   f"({ck.get('n_samples_total', 0)} отсчётов x 4 байта)")
+    if tail < 0:
+        bad.append(f"clips.bin короче обещанного: {have} байт против {want} "
+                   f"({ck.get('n_samples_total', 0)} отсчётов x 4 байта) — "
+                   f"записанного не хватает")
     if bad:
+        if tail > 0:
+            # Хвост сам по себе безобиден, но при разошедшемся составе частей
+            # обрезать вслепую нельзя: неизвестно, чей он.
+            bad.append(f"и вдобавок clips.bin длиннее обещанного на {tail} байт")
         sys.exit("\n".join([
             "чекпоинт и данные на диске разошлись, продолжать нельзя:",
             *("  - " + b for b in bad),
@@ -165,6 +198,12 @@ def _reconcile(ck):
             f"    {CHECKPOINT_JSON}",
             "либо вернуть недостающее из резервной копии и запустить снова.",
         ]))
+    if tail > 0:
+        with open(CLIPS_BIN, "r+b") as f:
+            f.truncate(want)
+        print(f"clips.bin был длиннее чекпоинта на {tail} байт — обрезан до {want}. "
+              f"Так выглядит шард, прерванный на середине: его байты не адресованы "
+              f"ни одной готовой частью, и он будет прочитан заново.")
     return shards
 
 

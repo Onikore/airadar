@@ -86,6 +86,43 @@ def selfcheck():
     rep_bad = audit(bad)
     assert rep_bad["ok"] is False
 
+    # Одна группа на всю таблицу — вырожденный случай для check_group_not_split:
+    # множество split для единственной группы всегда синглтон, разрыва нет.
+    single_group = pa.table({
+        "group_id": [99, 99, 99], "split": [0, 0, 0],
+        "label": [1, 0, 1],
+        "category": pa.array(["wind", None, "wind"], type=pa.string()),
+    })
+    assert check_group_not_split(single_group) == []
+    assert audit(single_group)["ok"] is True
+
+    # Категория присутствует в каждой запрошенной части сплита — покрытие
+    # полное, отчёт о пропусках должен быть пуст целиком, а не содержать
+    # части с пустыми списками.
+    full_coverage = pa.table({
+        "group_id": [20, 21], "split": [1, 2],
+        "label": [1, 0],
+        "category": pa.array(["fan", "fan"], type=pa.string()),
+    })
+    assert check_category_coverage(full_coverage, splits=(1, 2)) == {}
+
+    # Самое важное свойство audit(): "ok" реагирует ТОЛЬКО на разрыв группы
+    # между сплитами, а не на дисбаланс меток или пропуски категорий — те
+    # законны на малых стратах и не являются структурным багом манифеста.
+    # Фикстура ниже нарочно даёт явный дисбаланс меток (2 против 1 внутри
+    # сплита 1) и пропуски категорий (wind/rain не пересекаются между
+    # сплитами), но группы не разорваны — ok обязан остаться True.
+    benign = pa.table({
+        "group_id": [10, 10, 11, 12], "split": [1, 1, 1, 2],
+        "label": [1, 1, 0, 0],
+        "category": pa.array(["wind", "wind", "wind", "rain"], type=pa.string()),
+    })
+    assert check_group_not_split(benign) == []
+    rep_benign = audit(benign)
+    assert rep_benign["label_balance"][1] == {1: 2, 0: 1}, rep_benign   # дисбаланс есть
+    assert rep_benign["missing_categories"] == {1: ["rain"], 2: ["wind"]}, rep_benign  # пропуски есть
+    assert rep_benign["ok"] is True, rep_benign   # но структурного бага нет — ok не падает
+
     print("manifest_audit selfcheck ok")
 
 

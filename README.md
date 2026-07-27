@@ -339,7 +339,7 @@ diag_leak.py  diag_hard.py  diag_compare.py       диагностика уте�
 field/     полевые записи и их спектрограммы
 models/    чекпоинты
 logs/      логи прогонов
-archive/   отработавшее: старый Kaggle-кэш, ранние эксперименты
+archive/   отработавшее: старые скрипты, ноутбуки, чекпоинты (см. ниже)
 
 DADS/  DroneAudioDataset/  cache_dads/  cache_hard/    данные (~20 ГБ)
 ```
@@ -359,11 +359,13 @@ DADS/  DroneAudioDataset/  cache_dads/  cache_hard/    данные (~20 ГБ)
 
 Каждый скрипт имеет `--selfcheck` — проверку логики без данных.
 
-В `archive/` лежит отработавшее: `data_prep.py` и `cache_kaggle/` (старый
-Kaggle-набор, строгое подмножество DADS), `test1-3.py` — ранние эксперименты,
-из них [test3.py](archive/test3.py) содержит проверку математики GCC-PHAT на
-симулированных 4-канальных данных. `cache_kaggle/` занимает 933 МБ и больше не
-нужен — можно удалить.
+В `archive/` лежит отработавшее: `train2.py`, `compare_models.py`,
+`prep_dads.py`, `prep_hard.py`, `prep_field.py` (заменены `prep_hf.py`),
+`plan.md` (заменён архитектурной спецификацией,
+[docs/superpowers/specs/](docs/superpowers/specs/)), `notebooks/` (обучение
+в Colab, сейчас — локальный GPU), и шесть старых чекпоинтов, отобранных по
+насыщенной `auc_hard` — сравнивать по ним больше нечего, базовая цифра
+теперь [bench_out/dronenet_local.json](bench_out/dronenet_local.json).
 
 ---
 

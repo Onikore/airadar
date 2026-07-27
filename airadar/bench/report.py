@@ -55,9 +55,10 @@ def run_bench(scorer, name, seed=0):
     # 2. лестница SNR50 по каждой полевой записи отдельно.
     #    Усреднять по записям нельзя: у них разная основная частота, и
     #    среднее спрятало бы, что одна пропускается целиком.
+    field = corpus.field_records()          # читаем один раз, используем в §2 и §3
     pool = [clips[i] for i in np.linspace(0, len(clips) - 1, 64).astype(int)]
     rep["snr50"] = {}
-    for nm, audio in corpus.field_records().items():
+    for nm, audio in field.items():
         curve = ladder.p_detect_curve(scorer, audio, pool, on, on - OFF_DELTA,
                                       seed=seed)
         rep["snr50"][nm] = {
@@ -69,7 +70,7 @@ def run_bench(scorer, name, seed=0):
     # 3. auc_fh и медианный перцентиль с блочным CI
     lg_hard = scorer.score(track)[mask]
     rep["field"] = {}
-    for nm, audio in corpus.field_records().items():
+    for nm, audio in field.items():
         lg_f = scorer.score(audio)
         rep["field"][nm] = {
             "n_windows": int(len(lg_f)),
@@ -174,7 +175,16 @@ def _markdown(rep):
         out += ["", f"Худшая полоса: **{st['worst_band']} Гц, "
                     f"recall {st['worst_recall']:.3f}** "
                     f"({st['n_windows']} окон). Это и есть отчётная величина — "
-                    f"среднее по полосам скрывает именно тяжёлые машины."]
+                    f"среднее по полосам скрывает именно тяжёлые машины.",
+                 "", "Recall по полосам считается на сыром (несглаженном) "
+                    "логите изолированного окна против того же порога `on`, "
+                    "что и рабочая точка — но `on` откалиброван по "
+                    "сглаженному EMA-потоку (`decision.smooth`), который "
+                    "гасит одиночные всплески. Сырому мгновенному пику "
+                    "проще пробить этот порог, чем сглаженному значению в "
+                    "потоке, поэтому recall по полосам НЕ сравним напрямую "
+                    "с `fa_actual`/`snr50` выше — те посчитаны на "
+                    "сглаженном+гистерезисном пайплайне, а это число — нет."]
     else:
         out += ["", f"Страты не посчитаны: {st.get('error', 'нет данных')}"]
     return "\n".join(out) + "\n"

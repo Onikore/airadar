@@ -19,6 +19,10 @@ def selfcheck():
         b = np.arange(100, 105, dtype=np.float32)
         off_a, n_a = w.write(a)
         off_b, n_b = w.write(b)
+        # flush обязан довести записанное до файла, не дожидаясь close:
+        # на нём держится обещание чекпоинта о размере clips.bin
+        w.flush()
+        assert os.path.getsize(path) == 15 * 4, os.path.getsize(path)
         w.close()
 
         assert off_a == 0 and n_a == 10
@@ -105,6 +109,13 @@ class ClipWriter:
         self._f.write(audio.tobytes())
         self._pos += len(audio)
         return offset, len(audio)
+
+    def flush(self):
+        # Нужен перед сохранением чекпоинта: чекпоинт утверждает, сколько
+        # отсчётов лежит в clips.bin, и это утверждение обязано быть верным в
+        # момент записи. Иначе убитый процесс оставит файл короче обещанного,
+        # и следующий запуск примет исправное состояние за порчу.
+        self._f.flush()
 
     def close(self):
         self._f.close()

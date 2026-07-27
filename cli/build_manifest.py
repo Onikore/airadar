@@ -5,11 +5,18 @@
 
 Чекпоинт по шардам, как в prep_hf.py: строки манифеста каждого шарда сразу
 пишутся в свой parquet-файл части (data/parts/<ключ>.parquet), а в JSON-
-чекпоинте хранятся только список готовых ключей и next_clip_id — не сами
-строки. Иначе на полном прогоне (десятки тысяч строк, 85 шардов) JSON
-чекпоинта пришлось бы целиком перезаписывать после каждого шарда, и это
-стало бы тяжелее с каждым шардом. Финальная сборка — конкатенация всех
-частей одним проходом в конце, а не накопление в памяти по ходу.
+чекпоинте хранятся только счётчики — не сами строки. Иначе на полном прогоне
+(десятки тысяч строк, 85 шардов) JSON чекпоинта пришлось бы целиком
+перезаписывать после каждого шарда, и это стало бы тяжелее с каждым шардом.
+Финальная сборка — конкатенация всех частей одним проходом в конце, а не
+накопление в памяти по ходу.
+
+Чекпоинт — это ещё и утверждение о состоянии диска, а не только «докуда
+дошли»: он хранит версию схемы, число строк КАЖДОГО шарда (включая нулевое) и
+суммарное число отсчётов в clips.bin. Перед открытием писателя _reconcile
+сверяет это утверждение с фактом. Без сверки потерянный чекпоинт при живых
+частях означал mode="wb" — clips.bin обрезался, части выживали, и их строки
+адресовали чужое аудио; манифест при этом проходил аудит как исправный.
 """
 
 import os
@@ -36,45 +43,188 @@ CHECKPOINT_JSON = os.path.join(OUT_DIR, "build_checkpoint.json")
 ORDER = (S.SRC_ESC, S.SRC_URBAN, S.SRC_DAS, S.SRC_DADS)   # мелкие источники первыми
 
 
+def _empty_checkpoint():
+    return {"ver": MANIFEST_VERSION, "shards": {}, "next_clip_id": 0,
+            "n_samples_total": 0}
+
+
+def _parts_on_disk():
+    if not os.path.isdir(PARTS_DIR):
+        return set()
+    return {f[:-len(".parquet")] for f in os.listdir(PARTS_DIR)
+            if f.endswith(".parquet")}
+
+
+def _drop_stale(old_ver):
+    """Части чужой версии схемы не пригодятся никогда — колонки не совпадают.
+
+    Удаляются вместе с clips.bin: смещения в нём адресуются только через
+    части, и оставленный файл ушёл бы в mode="ab" под новые смещения. Тот же
+    приём, что _local_done в prep_hf.py применяет к своим частям.
+    """
+    n = 0
+    for k in sorted(_parts_on_disk()):
+        os.remove(os.path.join(PARTS_DIR, k + ".parquet"))
+        n += 1
+    for p in (CLIPS_BIN, MANIFEST_PARQUET):
+        if os.path.exists(p):
+            os.remove(p)
+    print(f"  чекпоинт версии {old_ver}, код версии {MANIFEST_VERSION}: удалено "
+          f"частей {n}, clips.bin и manifest.parquet тоже — сборка начнётся заново")
+
+
 def _load_checkpoint():
-    if os.path.exists(CHECKPOINT_JSON):
-        with open(CHECKPOINT_JSON) as f:
-            return json.load(f)
-    return {"done": [], "next_clip_id": 0}
+    """Читает чекпоинт; при чужой версии схемы обнуляет его вместе с данными.
+
+    Формат: {"ver", "shards": {ключ: строк}, "next_clip_id", "n_samples_total"}.
+
+    shards — словарь, а не список готовых ключей: шард, не давший ни одной
+    строки, обязан остаться отличимым от успешного. Раньше он попадал в done
+    без части, без записи и без следа и на каждом следующем прогоне
+    пропускался молча — навсегда.
+
+    n_samples_total — обещание о размере clips.bin, по которому _reconcile
+    отличает исправное состояние от потерянного чекпоинта.
+    """
+    if not os.path.exists(CHECKPOINT_JSON):
+        return _empty_checkpoint()
+    try:
+        with open(CHECKPOINT_JSON, encoding="utf-8") as f:
+            ck = json.load(f)
+    except json.JSONDecodeError as e:
+        # Атомарная запись (_save_checkpoint) обрывков не оставляет, но файл
+        # мог остаться от прежней, неатомарной версии. Естественное «удалить и
+        # перезапустить» ведёт прямо в порчу clips.bin — предупреждаем.
+        sys.exit(f"чекпоинт {CHECKPOINT_JSON} не разбирается: {e}\n"
+                 f"Просто удалить его нельзя: части и clips.bin останутся, и "
+                 f"сборка начнёт писать поверх них.\nЛибо восстановить чекпоинт "
+                 f"из копии, либо удалить всё сразу — {PARTS_DIR}, {CLIPS_BIN} и "
+                 f"сам чекпоинт — и собрать заново.")
+    ver = int(ck.get("ver", 0))
+    if ver != MANIFEST_VERSION:
+        _drop_stale(ver)
+        return _empty_checkpoint()
+    return ck
 
 
 def _save_checkpoint(ck):
-    with open(CHECKPOINT_JSON, "w") as f:
-        json.dump(ck, f)
+    """Атомарная запись: временный файл плюс os.replace.
+
+    Убитый посреди записи процесс обязан оставить либо старый чекпоинт целиком,
+    либо новый целиком. Обрывок JSON лечится «удалить чекпоинт и перезапустить»
+    — а это прямой путь в порчу clips.bin, от которой защищает _reconcile.
+    """
+    tmp = CHECKPOINT_JSON + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(ck, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, CHECKPOINT_JSON)
 
 
-def _ingest_all(limit=None):
+def _reconcile(ck):
+    """Сверяет чекпоинт с тем, что реально лежит на диске, до открытия писателя.
+
+    Режим записи в clips.bin раньше выбирался по пустоте done — то есть по
+    чекпоинту, а не по файлу. Потерянный или сброшенный чекпоинт при живых
+    частях означал mode="wb": clips.bin обрезался в ноль, старые части
+    оставались и попадали в итоговый манифест, и их строки начинали адресовать
+    ЧУЖОЕ аудио. Молча: audit() на таком манифесте отвечал ok: true.
+
+    Чинить это автоматически нечем — состав обрезанного файла восстановить
+    неоткуда. Поэтому расхождение здесь останавливает прогон с объяснением, а
+    решение принимает человек.
+    """
+    shards = dict(ck.get("shards") or {})
+    parts = _parts_on_disk()
+    expected = {k for k, n in shards.items() if n > 0}
+    have = os.path.getsize(CLIPS_BIN) if os.path.exists(CLIPS_BIN) else 0
+    want = 4 * int(ck.get("n_samples_total", 0))      # float32 = 4 байта
+
+    bad = []
+    missing, extra = sorted(expected - parts), sorted(parts - expected)
+    if missing:
+        bad.append(f"чекпоинт числит готовыми части, которых нет на диске: {missing}")
+    if extra:
+        bad.append(f"на диске есть части, о которых чекпоинт не знает: {extra}")
+    if have != want:
+        bad.append(f"clips.bin — {have} байт, чекпоинт обещает {want} "
+                   f"({ck.get('n_samples_total', 0)} отсчётов x 4 байта)")
+    if bad:
+        sys.exit("\n".join([
+            "чекпоинт и данные на диске разошлись, продолжать нельзя:",
+            *("  - " + b for b in bad),
+            "",
+            "Так выглядит потерянный, сброшенный или недописанный чекпоинт при",
+            "живых частях. Дописывать в clips.bin вслепую нельзя: часть строк",
+            "начнёт адресовать чужое аудио, а манифест будет выглядеть исправным.",
+            "Автоматической починки нет — что лежало в обрезанном файле, знать",
+            "неоткуда. Либо удалить и собрать заново:",
+            f"    {PARTS_DIR}",
+            f"    {CLIPS_BIN}",
+            f"    {CHECKPOINT_JSON}",
+            "либо вернуть недостающее из резервной копии и запустить снова.",
+        ]))
+    return shards
+
+
+def _ingest_all(limit=None, allow_empty=False):
     """Скачивает и пишет недостающие шарды. Возвращает next_clip_id."""
     os.makedirs(PARTS_DIR, exist_ok=True)
     ck = _load_checkpoint()
-    done = set(ck["done"])
-    writer = ClipWriter(CLIPS_BIN, mode="ab" if done else "wb")
-    next_id = ck["next_clip_id"]
+    shards = _reconcile(ck)
+    next_id = int(ck.get("next_clip_id", 0))
+    total = int(ck.get("n_samples_total", 0))
 
-    for src in ORDER:
-        rels = S.shards(src)
-        if limit is not None:
-            rels = rels[:limit]
-        for i, rel in enumerate(rels):
-            key = _key(src, i)
-            if key in done:
-                continue
-            print(f"[{S.NAMES[src]} {i+1}/{len(rels)}] {rel}")
-            path = S.local_shard(src, rel)
-            new_rows, next_id = ingest_shard(S.read_shard(src, path), writer,
-                                             next_id, key)
-            if new_rows:
-                pq.write_table(rows_to_table(new_rows),
-                               os.path.join(PARTS_DIR, f"{key}.parquet"))
-            done.add(key)
-            _save_checkpoint({"done": sorted(done), "next_clip_id": next_id})
+    empty_before = sorted(k for k, n in shards.items() if n == 0)
+    if empty_before:
+        print(f"ВНИМАНИЕ: {len(empty_before)} шардов прошлых прогонов не дали ни "
+              f"одной строки: {empty_before}")
 
-    writer.close()
+    # Режим — по фактическому состоянию файла, а не по пустоте чекпоинта;
+    # после _reconcile эти два состояния заведомо согласованы.
+    mode = "ab" if os.path.exists(CLIPS_BIN) else "wb"
+    with ClipWriter(CLIPS_BIN, mode=mode) as writer:
+        for src in ORDER:
+            rels = S.shards(src)
+            if limit is not None:
+                rels = rels[:limit]
+            for i, rel in enumerate(rels):
+                key = _key(src, i)
+                if key in shards:
+                    continue
+                print(f"[{S.NAMES[src]} {i+1}/{len(rels)}] {rel}")
+                path = S.local_shard(src, rel)
+                new_rows, next_id = ingest_shard(S.read_shard(src, path), writer,
+                                                 next_id, key)
+                n_new = sum(r["n_samples"] for r in new_rows)
+                total += n_new
+                print(f"    шард {key}: строк {len(new_rows)}, отсчётов {n_new}, "
+                      f"всего в clips.bin {total}")
+                if not new_rows:
+                    # Шард без строк — не то же самое, что успешно обработанный.
+                    # Смена кодека, битая закачка, перезалив датасета на HF
+                    # выглядят ровно так, и молча пометить его готовым значит
+                    # потерять его навсегда: спецификация (§5) требует, чтобы
+                    # ничего не выбрасывалось кодом молча.
+                    print(f"ВНИМАНИЕ: шард {key} ({rel}) не дал ни одной строки")
+                    if not allow_empty:
+                        sys.exit(
+                            f"шард {key} ({rel}) не дал ни одной строки — прогон "
+                            f"остановлен.\nЭто может быть законно (в шарде нет "
+                            f"подходящих записей), а может быть битой закачкой или "
+                            f"сменой формата источника.\nЕсли пустота ожидаема, "
+                            f"запустите с --allow-empty-shards: тогда факт будет "
+                            f"записан в чекпоинт, а не пропущен молча.")
+                else:
+                    pq.write_table(rows_to_table(new_rows),
+                                   os.path.join(PARTS_DIR, f"{key}.parquet"))
+                shards[key] = len(new_rows)
+                # Порядок важен: сначала данные на диск, потом обещание о них.
+                writer.flush()
+                _save_checkpoint({"ver": MANIFEST_VERSION, "shards": shards,
+                                  "next_clip_id": next_id,
+                                  "n_samples_total": total})
     return next_id
 
 
@@ -84,16 +234,31 @@ def _assemble():
                    if f.endswith(".parquet"))
     if not parts:
         sys.exit("нет ни одной части — сборка не выполнялась")
+    tables = []
+    for p in parts:
+        t = pq.read_table(p)
+        if t.num_rows == 0:
+            sys.exit(f"часть {os.path.basename(p)} пуста — пустые части не пишутся, "
+                     f"файл появился не от этой сборки")
+        # Вторая, независимая от чекпоинта проверка версии: части могли быть
+        # записаны разными запусками, и правка схемы посреди многодневного
+        # прогона не должна давать склейку несовместимых записей.
+        alien = sorted({v for v in t.column("prep_version").to_pylist()
+                        if v != MANIFEST_VERSION})
+        if alien:
+            sys.exit(f"часть {os.path.basename(p)} собрана под версиями схемы "
+                     f"{alien}, код — под {MANIFEST_VERSION}: склеивать нельзя")
+        tables.append(t)
     # concat_tables — в pyarrow, а не в pyarrow.parquet (в отличие от read_table/write_table)
-    table = pa.concat_tables([pq.read_table(p) for p in parts])
+    table = pa.concat_tables(tables)
     table = apply_split(table)
     pq.write_table(table, MANIFEST_PARQUET)
     print(f"манифест: {table.num_rows} строк из {len(parts)} частей -> {MANIFEST_PARQUET}")
     print(f"клипы: -> {CLIPS_BIN}")
 
 
-def main(limit=None):
-    _ingest_all(limit=limit)
+def main(limit=None, allow_empty=False):
+    _ingest_all(limit=limit, allow_empty=allow_empty)
     _assemble()
 
 
@@ -101,5 +266,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None,
                     help="шардов на источник (для проверки, не для полного прогона)")
+    ap.add_argument("--allow-empty-shards", action="store_true",
+                    help="не останавливаться на шарде без строк, а записать "
+                         "этот факт в чекпоинт и идти дальше")
     a = ap.parse_args()
-    main(limit=a.limit)
+    main(limit=a.limit, allow_empty=a.allow_empty_shards)

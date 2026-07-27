@@ -9,6 +9,11 @@ __pycache__/
 *.pyc
 evalx/*.npz
 parts/
+# Выход сборки манифеста: clips.bin — это гигабайты аудио, manifest.parquet и
+# build_checkpoint.json производны от него. Один `git add -A` — и всё это
+# уходит в историю бинарным блобом. Ведущий слеш обязателен: без него шаблон
+# накрыл бы и пакет airadar/data/ с исходниками.
+/data/
 *.MOV
 *.mp4
 *.mkv

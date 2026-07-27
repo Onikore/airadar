@@ -61,6 +61,17 @@ def cosine_hum_drone(seed=0):
     }
 
 
+def median_flatten(spec, ker):
+    """Стирает гребёнку медианным фильтром по частотной оси (не по времени)."""
+    ker = max(3, ker | 1)
+    pad = ker // 2
+    padded = np.pad(spec, ((pad, pad), (0, 0)), mode="edge")
+    view = np.lib.stride_tricks.as_strided(
+        padded, shape=(spec.shape[0], ker, spec.shape[1]),
+        strides=(padded.strides[0], padded.strides[0], padded.strides[1]))
+    return np.median(view, axis=1)
+
+
 def selfcheck():
     # comb() детерминирован по seed снаружи — здесь просто форма и энергия
     x = comb(78.0)
@@ -75,7 +86,53 @@ def selfcheck():
     for k in ("hum_vs_62", "hum_vs_78", "hum_vs_200"):
         assert -1.0 - 1e-6 <= res[k] <= 1.0 + 1e-6, (k, res[k])
 
+    # median_flatten: на плоском (константном) спектре ничего не меняет
+    flat = np.full((20, 5), 3.0, np.float32)
+    assert np.allclose(median_flatten(flat, ker=5), flat)
+
+    # на спектре с одиночным пиком по частоте — пик стирается медианой
+    spec = np.zeros((21, 3), np.float32)
+    spec[10] = 10.0                            # пик в середине частотной оси
+    out = median_flatten(spec, ker=7)
+    assert out[10, 0] < 5.0, out[10, 0]        # пик подавлен
+    assert np.allclose(out[0], spec[0])        # края почти не тронуты (edge-паддинг)
+
     print("feat_visibility selfcheck ok")
+
+
+def visibility_field(f0_by_name=None):
+    """Видимость гребёнки на полевых записях: |ch0(с гребёнкой) - ch0(без)| в дБ.
+
+    f0 записей взяты из evalx/f0_survey.py (задокументировано в README):
+    drone_video1.wav ~78 Гц, drone_video2.wav ~62 Гц.
+    """
+    from airadar.bench.corpus import field_records
+
+    f0_by_name = f0_by_name or {"drone_video1.wav": 78.0, "drone_video2.wav": 62.0}
+    cqt = LogCQT()
+    out = {}
+    for name, wav in field_records().items():
+        f0 = f0_by_name.get(name)
+        if f0 is None:
+            continue
+        ch0 = cqt(torch.from_numpy(wav.astype(np.float32))).squeeze(0).numpy()  # [183, T]
+        # Ширина медианного окна — диапазон от f0 до 2.5*f0 (запас "1.5*f0"
+        # поверх самой f0, как в исходном evalx/feat_visibility.py), в бинах
+        # ЛОГ-оси. На линейной STFT-оси ширина в бинах зависела от f0 (там
+        # ker = 1.5*f0 / (SR/n_fft)); на лог-оси она НЕ зависит от f0 —
+        # ровно то свойство self-similarity, ради которого выбран constant-Q:
+        # соотношение f0 -> 2.5*f0 занимает одно и то же число бинов на
+        # любой частоте.
+        ker_bins = max(3, int(round(BINS_PER_OCTAVE * np.log2(2.5))))   # ~32 бина
+        flat = median_flatten(ch0, ker_bins)
+        diff_db = np.abs(ch0 - flat).mean(axis=1) * 10.0 / np.log(10.0)  # нат -> дБ
+        lo = cqt.frequencies < 300.0
+        out[name] = {
+            "vis_all_db": float(diff_db.mean()),
+            "vis_low_db": float(diff_db[lo].max()) if lo.any() else float("nan"),
+            "f0": f0,
+        }
+    return out
 
 
 def report():

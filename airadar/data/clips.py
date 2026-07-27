@@ -24,11 +24,20 @@ def selfcheck():
         assert off_a == 0 and n_a == 10
         assert off_b == 10 and n_b == 5, (off_b, n_b)   # встык, без разрывов
 
-        r = ClipReader(path)
-        assert np.array_equal(r.read(off_a, n_a), a)
-        assert np.array_equal(r.read(off_b, n_b), b)
-        del r   # на Windows memmap держит файл открытым, пока жив объект —
-                # иначе следующий open("ab") и удаление tempdir могут упасть
+        with ClipReader(path) as r:
+            assert np.array_equal(r.read(off_a, n_a), a)
+            assert np.array_equal(r.read(off_b, n_b), b)
+
+            # чтение за пределами файла — явная ошибка, а не тихая усечка
+            try:
+                r.read(off_b, n_b + 1000)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("read должен проверять границы файла")
+        # r.close() вызван через __exit__ — memmap освобождён по-настоящему,
+        # а не по случайному моменту сборки мусора (важно на Windows, где
+        # незакрытый memmap держит файл залоченным)
 
         # запись пустого клипа не должна ломать смещения следующего
         off_empty, n_empty = w2_offset_check(path)
@@ -82,13 +91,35 @@ class ClipWriter:
 
 
 class ClipReader:
-    """Читает клип по (offset, n_samples) через memmap — без чтения всего файла."""
+    """Читает клип по (offset, n_samples) через memmap — без чтения всего файла.
+
+    На Windows memmap держит файл залоченным, пока жив объект — используйте
+    `close()` или контекстный менеджер, а не полагайтесь на сборку мусора,
+    иначе последующий open() того же файла на запись/удаление может упасть.
+    """
 
     def __init__(self, bin_path):
         self._mm = np.memmap(bin_path, dtype=np.float32, mode="r")
 
     def read(self, offset, n_samples):
-        return np.array(self._mm[offset:offset + n_samples])
+        end = offset + n_samples
+        if end > len(self._mm):
+            raise ValueError(
+                f"клип [{offset}:{end}) выходит за пределы файла "
+                f"(в файле {len(self._mm)} отсчётов) — манифест рассинхронизирован с clips.bin"
+            )
+        return np.array(self._mm[offset:end])
+
+    def close(self):
+        # у np.memmap нет явного close() — сброс ссылки и есть штатный способ
+        # освободить mmap; без него на Windows файл остаётся залоченным
+        self._mm = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
 
 if __name__ == "__main__":

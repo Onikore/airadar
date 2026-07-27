@@ -45,15 +45,28 @@ def selfcheck():
 
     # неверный dtype на входе — явная ошибка, не молчаливое приведение
     with tempfile.TemporaryDirectory() as d:
-        w = ClipWriter(os.path.join(d, "c.bin"))
+        with ClipWriter(os.path.join(d, "c.bin")) as w:
+            try:
+                w.write(np.arange(5, dtype=np.int16))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("write должен требовать float32")
+        # выход из with обязан закрыть файл даже после ошибки внутри блока
+        assert w._f.closed, "ClipWriter.__exit__ не закрыл файл"
+
+    # файл, оборванный на не кратном 4 размере, дописывать нельзя: иначе все
+    # последующие клипы уедут на 1-3 байта относительно манифеста
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "torn.bin")
+        with open(path, "wb") as f:
+            f.write(b"\x00" * 10)              # 2.5 отсчёта float32
         try:
-            w.write(np.arange(5, dtype=np.int16))
-        except ValueError:
-            pass
+            ClipWriter(path, mode="ab")
+        except AssertionError as e:
+            assert "не кратен 4" in str(e), str(e)
         else:
-            raise AssertionError("write должен требовать float32")
-        finally:
-            w.close()
+            raise AssertionError("ClipWriter должен ловить оборванный clips.bin")
 
     print("clips selfcheck ok")
 
@@ -74,6 +87,13 @@ class ClipWriter:
         # конца файла до первой записи. os.path.getsize — то же самое,
         # но без этой двусмысленности.
         existing = os.path.getsize(bin_path) if (mode == "ab" and os.path.exists(bin_path)) else 0
+        # Оборванная запись (убитый процесс, кончившееся место) оставляет файл
+        # на границе не кратной 4 байтам. Целочисленное деление ниже это
+        # проглотит, и КАЖДЫЙ следующий клип уедет на 1-3 байта относительно
+        # того, что о нём говорит манифест, — молча, до самого обучения.
+        assert existing % 4 == 0, (
+            f"clips.bin повреждён: размер {existing} не кратен 4 байтам (float32), "
+            f"дописывать в него нельзя — предыдущая запись оборвалась")
         self._f = open(bin_path, mode)
         self._pos = existing // 4           # float32 = 4 байта
 
@@ -88,6 +108,15 @@ class ClipWriter:
 
     def close(self):
         self._f.close()
+
+    # Писатель открыт на всё время сборки (часы). Обрыв сети посреди прогона —
+    # штатный сценарий, а не исключительный: без контекстного менеджера файл
+    # закрывался бы только сборщиком мусора, в неопределённый момент.
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
 
 class ClipReader:

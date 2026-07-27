@@ -1,0 +1,11 @@
+=== ПЕРВЫЙ ПРОГОН (--limit 1) ===
+[ESC-50 1/1] C:\Users\grish/.cache/huggingface/hub\datasets--ashraq--esc50\snapshots\e3e2a63ffff66b9a9735524551e3818e96af03ee\data\train-00000-of-00002-2f1ab7b824ec751f.parquet
+[UrbanSound8K 1/1] C:\Users\grish/.cache/huggingface/hub\datasets--danavery--urbansound8K\snapshots\8aa9177a0c5a6949ee4ee4b7fcabb01dfd4ae466\data\train-00000-of-00016-e478d7cccca6a095.parquet
+[DroneAudioSet 1/1] C:\Users\grish/.cache/huggingface/hub\datasets--ahlab-drone-project--DroneAudioSet\snapshots\e794007062e2d2ad29262a5795b60d09f2b345c4\drone-only\train_001-00000-of-00001.parquet
+[DADS 1/1] C:\Users\grish/.cache/huggingface/hub\datasets--geronimobasso--drone-audio-detection-samples\snapshots\981b832c35b45a57518c989f0f79101adb4ae91f\data\train-00000-of-00039.parquet
+манифест: 6174 строк из 4 частей -> c:\Users\grish\Desktop\airadar\data\manifest.parquet
+клипы: -> c:\Users\grish\Desktop\airadar\data\clips.bin
+
+=== ВТОРОЙ ПРОГОН (--limit 1, поверх готового чекпоинта) ===
+манифест: 6174 строк из 4 частей -> c:\Users\grish\Desktop\airadar\data\manifest.parquet
+клипы: -> c:\Users\grish\Desktop\airadar\data\clips.bin

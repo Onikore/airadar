@@ -66,7 +66,8 @@ def _ingest_all(limit=None):
                 continue
             print(f"[{S.NAMES[src]} {i+1}/{len(rels)}] {rel}")
             path = S.local_shard(src, rel)
-            new_rows, next_id = ingest_shard(S.read_shard(src, path), writer, next_id)
+            new_rows, next_id = ingest_shard(S.read_shard(src, path), writer,
+                                             next_id, key)
             if new_rows:
                 pq.write_table(rows_to_table(new_rows),
                                os.path.join(PARTS_DIR, f"{key}.parquet"))

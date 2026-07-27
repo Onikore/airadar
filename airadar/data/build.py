@@ -27,9 +27,9 @@ def selfcheck():
         FakeRec(np.full(30, 2.0, np.float32), group=9, label=1, cat=None, src=1),
     ]
     with tempfile.TemporaryDirectory() as d:
-        w = ClipWriter(os.path.join(d, "clips.bin"))
-        rows, next_id = ingest_shard(iter(recs), w, next_clip_id=100)
-        w.close()
+        with ClipWriter(os.path.join(d, "clips.bin")) as w:
+            rows, next_id = ingest_shard(iter(recs), w, next_clip_id=100,
+                                         shard="0_0003")
 
         assert next_id == 103, next_id
         assert len(rows) == 3
@@ -47,16 +47,32 @@ def selfcheck():
         assert rows[0]["synth"] is False
         assert rows[1]["synth"] is False
         assert rows[2]["synth"] is False
+        # происхождение строки — ключ шарда, один на весь вызов
+        assert all(r["shard"] == "0_0003" for r in rows), rows[0]["shard"]
 
         for r in rows:
             validate_row(r)                # строки обязаны проходить схему
 
     # пустой генератор — пустой результат, next_clip_id не меняется
     with tempfile.TemporaryDirectory() as d:
-        w = ClipWriter(os.path.join(d, "c.bin"))
-        rows2, next_id2 = ingest_shard(iter([]), w, next_clip_id=0)
-        w.close()
+        with ClipWriter(os.path.join(d, "c.bin")) as w:
+            rows2, next_id2 = ingest_shard(iter([]), w, next_clip_id=0,
+                                           shard="1_0000")
         assert rows2 == [] and next_id2 == 0
+
+    # клип не float32 обязан доходить до проверки в ClipWriter.write, а не
+    # приводиться по дороге: молчаливое приведение int16 дало бы значения
+    # ±32768 вместо нормированных ±1.0 и не сломало бы ничего до обучения
+    with tempfile.TemporaryDirectory() as d:
+        bad = [FakeRec(np.arange(5, dtype=np.int16), group=1, label=0,
+                       cat=None, src=2)]
+        with ClipWriter(os.path.join(d, "c.bin")) as w:
+            try:
+                ingest_shard(iter(bad), w, next_clip_id=0, shard="2_0000")
+            except ValueError as e:
+                assert "float32" in str(e), str(e)
+            else:
+                raise AssertionError("ingest_shard не должен приводить dtype молча")
 
     assert _key(0, 3) == "0_0003"
 
@@ -74,20 +90,26 @@ def _domain(rec):
     return f"scene_{rec.group}"
 
 
-def rec_to_row(rec, clip_id, offset, n_samples):
+def rec_to_row(rec, clip_id, shard, offset, n_samples):
     return make_row(
-        clip_id=clip_id, src=rec.src, offset=offset, n_samples=n_samples,
+        clip_id=clip_id, src=rec.src, shard=shard,
+        offset=offset, n_samples=n_samples,
         label=rec.label, label_conf=1.0, group_id=rec.group,
         domain=_domain(rec), category=rec.cat, synth=False,
     )
 
 
-def ingest_shard(rec_iter, writer, next_clip_id):
+def ingest_shard(rec_iter, writer, next_clip_id, shard):
     rows = []
     cid = next_clip_id
     for rec in rec_iter:
-        offset, n = writer.write(rec.audio.astype(np.float32))
-        rows.append(rec_to_row(rec, cid, offset, n))
+        # rec.audio передаётся как есть, без .astype(np.float32): приведение
+        # здесь разоружало бы проверку dtype в ClipWriter.write — единственное
+        # место, где нарушение инварианта «клип float32, пик нормирован в 1.0»
+        # вообще может проявиться. int16 после тихого приведения дал бы
+        # значения ±32768 вместо ±1.0, и это всплыло бы только на обучении.
+        offset, n = writer.write(rec.audio)
+        rows.append(rec_to_row(rec, cid, shard, offset, n))
         cid += 1
     return rows, cid
 

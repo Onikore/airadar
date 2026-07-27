@@ -21,7 +21,8 @@ ap.add_argument("--device", default="cpu")
 ap.add_argument("--seed", type=int, default=0)
 a = ap.parse_args()
 
-rep = run_bench(LegacyScorer(a.model, a.device), a.name, a.seed)
+rep = run_bench(LegacyScorer(a.model, a.device), a.name, a.seed,
+                model_path=a.model)
 jp, mp = write_report(rep)
 
 # Отчёт написан на диск (файлы уже в UTF-8) до этой точки — печать в консоль

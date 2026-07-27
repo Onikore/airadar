@@ -10,7 +10,41 @@
 """
 
 import sys
+from typing import NamedTuple
+
 import numpy as np
+
+
+class FaThreshold(NamedTuple):
+    """Результат подбора порога под бюджет FA/час.
+
+    Кортеж, а не голое число, ровно по одной причине: у подбора есть исход
+    «сетка исчерпана, бюджет недостижим», и раньше он возвращался тем же
+    типом, что и настоящая калибровка. В отчёте это выглядело как «бюджет
+    выполнен с запасом», а на деле означало «порог = максимум фона плюс
+    off_delta, тревога не сработает никогда». Теперь вызывающий обязан
+    посмотреть на `found`, а арифметика прямо по результату (`thr - 1.0`)
+    падает с TypeError вместо того, чтобы молча взять запасное значение.
+
+    on    — порог включения
+    found — сетка дала порог, реально удовлетворяющий бюджету
+    fa    — фактический FA/час при этом пороге (nan, если ряд пуст)
+    """
+
+    on: float
+    found: bool
+    fa: float
+
+
+def fa_resolution_per_hour(n_windows, hop_s):
+    """Наименьшая ненулевая FA/час, различимая на ряде из n_windows окон.
+
+    FA/час квантована шагом «одно событие на всю длительность фона». Если
+    бюджет меньше этого шага, единственный способ его выполнить — ноль
+    событий, и подбор порога вырождается в «выше максимума ряда».
+    """
+    hours = n_windows * hop_s / 3600.0
+    return float("inf") if hours <= 0 else 1.0 / hours
 
 
 def selfcheck():
@@ -63,8 +97,35 @@ def selfcheck():
     # подбор порога под бюджет: результат обязан дать FA не выше бюджета
     rng = np.random.default_rng(0)
     noise = rng.normal(0, 1, n).astype(np.float32)
-    thr = threshold_for_fa(noise, hop, target_fa=1.0, dead_s=30.0)
-    assert fa_per_hour(noise, hop, thr, thr - 1.0, dead_s=30.0) <= 1.0 + 1e-9
+    r = threshold_for_fa(noise, hop, target_fa=1.0, dead_s=30.0)
+    assert r.found, r
+    assert fa_per_hour(noise, hop, r.on, r.on - 1.0, dead_s=30.0) <= 1.0 + 1e-9
+    assert abs(r.fa - fa_per_hour(noise, hop, r.on, r.on - 1.0, dead_s=30.0)) < 1e-9
+
+    # исчерпание сетки обязано отличаться от настоящей калибровки.
+    # Короткий ряд (0.1 ч) при бюджете 1 тревога/час: чтобы уложиться, нужен
+    # НОЛЬ событий, а ноль недостижим любым порогом из самого ряда — максимум
+    # ряда всегда даёт хотя бы одну тревогу. Раньше сюда же возвращалось
+    # обычное float и отчёт печатал «фактически 0.00 при бюджете 1.0».
+    short = rng.normal(0, 1, 1440).astype(np.float32)          # 1440*0.25 с = 0.1 ч
+    rs = threshold_for_fa(short, hop, target_fa=1.0, dead_s=30.0)
+    assert not rs.found, rs
+    assert rs.on > float(short.max()), rs           # запасное значение недостижимо
+    assert rs.fa == 0.0, rs                         # ноль тревог, но НЕ калибровка
+
+    # арифметика прямо по результату обязана падать, а не молча брать запасное
+    try:
+        _ = rs - 1.0
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("результат подбора порога ведёт себя как число")
+
+    # различимость бюджета: 0.1 ч фона квантует FA/час шагом 10/час,
+    # и бюджет 1/час на нём не разрешается в принципе
+    assert abs(fa_resolution_per_hour(1440, hop) - 10.0) < 1e-9
+    assert abs(fa_resolution_per_hour(int(3600 / hop), hop) - 1.0) < 1e-9
+    assert fa_resolution_per_hour(0, hop) == np.inf
 
     # маска в threshold_for_fa: подбор обязан вестись только по квантилям
     # немаскированных окон. Портим вторую половину ряда огромными выбросами
@@ -77,6 +138,12 @@ def selfcheck():
     quiet_mask = np.ones(n, bool); quiet_mask[7000:] = False
     thr_masked = threshold_for_fa(spiky, hop, target_fa=1.0, dead_s=30.0, mask=quiet_mask)
     assert thr_masked == threshold_for_fa(spiky[quiet_mask], hop, target_fa=1.0, dead_s=30.0)
+    # Побочно: 7000 окон это 0.486 ч, шаг квантования FA/час на них 2.06,
+    # и бюджет 1/час здесь недостижим по построению — found обязан быть False.
+    # Ровно это и происходило на настоящем фоне харнеса (0.495 ч), где
+    # запасное значение печаталось как «фактически 0.00 при бюджете 1.0».
+    assert not thr_masked.found, thr_masked
+    assert fa_resolution_per_hour(int(quiet_mask.sum()), hop) > 1.0
 
     # время до тревоги
     y = np.array([0, 0, 5, 5], np.float32)
@@ -170,17 +237,25 @@ def threshold_for_fa(logits_bg, hop_s, target_fa, off_delta=1.0,
     не стоит на практике — но гарантия действует только выше медианы: если
     для конкретных данных валидный порог лежит ниже неё, эта функция его не
     найдёт.
+
+    Возвращает FaThreshold(on, found, fa). found=False означает, что сетка
+    исчерпана и бюджет НЕ достигнут ни одним порогом из ряда; `on` тогда —
+    запасное значение (максимум ряда + off_delta), при котором тревога не
+    сработает вообще, и как калибровку его использовать нельзя.
     """
     x = np.asarray(logits_bg, np.float32)
     if mask is not None:
         x = x[np.asarray(mask, bool)]
     if len(x) == 0:
-        return float("inf")
+        return FaThreshold(float("inf"), False, float("nan"))
     grid = np.unique(np.quantile(x, np.linspace(0.5, 1.0, n_grid)))
     for thr in grid:                      # от низкого к высокому
-        if fa_per_hour(x, hop_s, thr, thr - off_delta, dead_s) <= target_fa:
-            return float(thr)
-    return float(grid[-1] + off_delta)
+        fa = fa_per_hour(x, hop_s, thr, thr - off_delta, dead_s)
+        if fa <= target_fa:
+            return FaThreshold(float(thr), True, float(fa))
+    fallback = float(grid[-1] + off_delta)
+    return FaThreshold(fallback, False,
+                       fa_per_hour(x, hop_s, fallback, fallback - off_delta, dead_s))
 
 
 def detected(logits, hop_s, on, off):

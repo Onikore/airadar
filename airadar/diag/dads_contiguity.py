@@ -104,6 +104,16 @@ def selfcheck():
     ok2, msg2 = verdict(ctl, ctl)
     assert not ok2, msg2
 
+    # третья ветка: отношение 2.0 между порогами 1.5 и 5.0 — ни один из двух
+    # уверенных вердиктов не должен сработать, иначе перепутанные условия
+    # if (смежны/не смежны) молча выдадут ложную уверенность вместо
+    # "разбираться отдельно".
+    adj3 = np.full(200, 3.0)
+    ctl3 = np.full(200, 6.0)
+    ok3, msg3 = verdict(adj3, ctl3)
+    assert not ok3, msg3
+    assert "промежуточ" in msg3, msg3
+
     print("dads_contiguity selfcheck ok")
 
 

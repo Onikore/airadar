@@ -787,15 +787,22 @@ def selfcheck():
 
         with ClipReader(path) as reader:
             rng = np.random.default_rng(42)
+            # pitch_prob=0 здесь: длина после сдвига f0 умножается на 1/r,
+            # r в [0.35, 1.5] может перекинуть клип через границу
+            # длинный/средний/короткий — эти два случая проверяют именно
+            # выбор режима ПО ДЛИНЕ, сдвиг проверен отдельно в pitch.py
+            no_pitch = AugCfg(pitch_prob=0.0)
 
             row_long = {"offset": off_long, "n_samples": n_long, "label": 1}
-            wav, label, meta = assemble_example(row_long, reader, neg_pool, rng)
+            wav, label, meta = assemble_example(row_long, reader, neg_pool, rng,
+                                                aug_cfg=no_pitch)
             assert label == 1 and meta["mode"] == "long"
             assert len(wav) >= tc.model_samples
             assert np.isfinite(wav).all()
 
             row_med = {"offset": off_med, "n_samples": n_med, "label": 1}
-            wav, label, meta = assemble_example(row_med, reader, neg_pool, rng)
+            wav, label, meta = assemble_example(row_med, reader, neg_pool, rng,
+                                                aug_cfg=no_pitch)
             assert meta["mode"] == "medium"
             assert len(wav) >= tc.model_samples
 

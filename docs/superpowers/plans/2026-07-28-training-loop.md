@@ -263,6 +263,14 @@ class ManifestDataset(Dataset):
             self._reader = ClipReader(self.clips_path)
         return self._reader
 
+    def close(self):
+        # На Windows незакрытый memmap держит clips.bin залоченным (см.
+        # airadar/data/clips.py) — важно освобождать явно, а не полагаться
+        # на сборщик мусора, иначе следующий открывающий процесс/тест упадёт.
+        if self._reader is not None:
+            self._reader.close()
+            self._reader = None
+
     def __getitem__(self, i):
         from airadar.config import TrainCfg
         train_cfg = self.train_cfg or TrainCfg()
@@ -301,7 +309,7 @@ def selfcheck():
     import tempfile
     import os
     from airadar.data.clips import ClipWriter
-    from airadar.config import TrainCfg
+    from airadar.config import TrainCfg, AugCfg
 
     sr = 16000
     tc = TrainCfg()
@@ -309,7 +317,12 @@ def selfcheck():
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "clips.bin")
         with ClipWriter(path) as w:
-            t = np.arange(round(2.0 * sr), dtype=np.float32) / sr
+            # клип ДЛИННЕЕ model_samples (4с): иначе assemble_example
+            # берёт режим "short" и кладёт тон на случайный офсет в
+            # канву фона при случайном SNR (вплоть до -15дБ) — метка f0
+            # тогда законно может не совпасть с чистым тоном
+            dur = tc.model_samples + 20000
+            t = np.arange(dur, dtype=np.float32) / sr
             tone = (0.3 * np.sin(2 * np.pi * 150.0 * t)).astype(np.float32)
             for k in range(2, 6):
                 tone += (0.3 / k) * np.sin(2 * np.pi * 150.0 * k * t).astype(np.float32)
@@ -322,20 +335,23 @@ def selfcheck():
                 neg_offsets.append((o, n))
 
         neg_pool = np.array(neg_offsets, dtype=np.int64)
+        # без сдвига f0 и с высоким принудительным SNR: f0-метка обязана
+        # совпасть с чистым тоном детерминированно, а не "обычно совпадает"
+        clean_cfg = AugCfg(pitch_prob=0.0, snr_db_lo=20.0, snr_db_hi=20.0, hum_prob=0.0)
 
         ds = ManifestDataset(
             offsets=[off_pos] + [o for o, n in neg_offsets],
             n_samples=[n_pos] + [n for o, n in neg_offsets],
             labels=[1] + [0] * 10,
             clip_ids=list(range(11)),
-            clips_path=path, neg_pool=neg_pool, deterministic=True)
+            clips_path=path, neg_pool=neg_pool, aug_cfg=clean_cfg, deterministic=True)
 
         assert len(ds) == 11
 
         item = ds[0]
         assert item["label"] == 1.0
         assert np.isfinite(item["wav"]).all()
-        # 150 Гц с явными гармониками -> salience выше порога, has_aux True
+        # 150 Гц с явными гармониками, SNR=20дБ -> salience выше порога
         assert item["has_aux"] is True, item["salience"]
         assert abs(item["f0"] - 150.0) < 5.0, item["f0"]
 
@@ -358,6 +374,8 @@ def selfcheck():
         assert torch.allclose(wav[0, -n0:], torch.from_numpy(items[0]["wav"][-n0:]))
         if n0 < tc.target_samples:
             assert torch.all(wav[0, :tc.target_samples - n0] == 0.0)
+
+        ds.close()   # освобождает memmap ДО выхода из TemporaryDirectory (Windows)
 
     print("dataset selfcheck ok")
 

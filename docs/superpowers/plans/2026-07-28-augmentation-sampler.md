@@ -301,13 +301,18 @@ def selfcheck():
     f0_hat = freqs[spec.argmax()]
     assert 49.0 <= f0_hat <= 51.0, f0_hat   # разрешение FFT на 1с ~1Гц, допуск шире расстройки
 
-    # расстройка реально варьируется между вызовами, не зафиксирована на 50.0
+    # расстройка реально варьируется между вызовами, не зафиксирована на
+    # 50.0 — на 1с окне разрешение FFT ровно 1Гц (>= ширины расстройки
+    # 0.4Гц), все черновики округлились бы в один и тот же бин. Нужно
+    # окно длиннее: 20с -> разрешение 0.05Гц, восьмикратный запас
+    dur_long = 20 * sr
+    freqs_long = np.fft.rfftfreq(dur_long, 1 / sr)
     f0s = []
     for _ in range(20):
-        h = make_hum(sr, sr, np.random.default_rng())
+        h = make_hum(dur_long, sr, np.random.default_rng())
         s = np.abs(np.fft.rfft(h * np.hanning(len(h))))
-        f0s.append(freqs[s.argmax()])
-    assert len(set(f0s)) > 1, "расстройка должна варьироваться"
+        f0s.append(round(freqs_long[s.argmax()], 2))
+    assert len(set(f0s)) > 1, ("расстройка должна варьироваться", f0s)
 
     wav = np.sin(2 * np.pi * 200.0 * np.arange(sr, dtype=np.float32) / sr)
     out = add_hum(wav, rng, amp_max=0.8, sr=sr)

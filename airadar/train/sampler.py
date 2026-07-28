@@ -24,7 +24,7 @@ import numpy as np
 
 from airadar.augment.pitch import sample_r, pitch_shift
 from airadar.augment.hum import add_hum
-from airadar.augment.mixing import snr_scale, mix_at_snr, random_gain, place_at_offset
+from airadar.augment.mixing import snr_scale, mix_at_snr, random_gain, place_at_offset, normalize_rms
 from airadar.augment.acoustic import cyclic_shift
 
 
@@ -120,6 +120,17 @@ def assemble_example(row, reader, neg_pool, rng, aug_cfg=None, train_cfg=None):
     if meta["mode"] == "hum_only" or rng.random() < aug_cfg.hum_prob:
         wav = add_hum(wav, rng, amp_max=aug_cfg.hum_amp_max)
         meta["hum_added"] = True
+    # RMS-нормализация ПОСЛЕ смешивания и гула, ДО random_gain: mix_at_snr
+    # складывает сигнал и фон без последующей нормализации (позитив =
+    # сигнал+фон, негатив = только фон) — сумма систематически громче
+    # одного слагаемого, и без этого шага позитивы медианно вдвое громче
+    # негативов (найдено систематической отладкой на реальном чекпоинте:
+    # клип_логит менял знак на РЕАЛЬНОЙ полевой записи при простом
+    # усилении громкости в 10-20 раз без изменения содержимого — модель
+    # училась громкости, не гребёнке). Пик не трогаем (щелчок внутри окна
+    # не должен диктовать масштаб — ровно за это пиковую убрали раньше),
+    # RMS от единичного импульса почти не двигается.
+    wav = normalize_rms(wav, target_rms=aug_cfg.target_rms)
     wav = random_gain(wav, rng, lo=aug_cfg.gain_db_lo, hi=aug_cfg.gain_db_hi)
 
     assert len(wav) >= train_cfg.model_samples, (len(wav), train_cfg.model_samples)

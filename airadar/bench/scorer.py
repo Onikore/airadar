@@ -123,6 +123,10 @@ class DroneNet2Scorer:
 
         self.hop_s = hop_s
         self.context_s = ck["train_cfg"]["target_samples"] / feature_cfg.sr
+        # .get с запасным значением: чекпоинты, сохранённые до найденного
+        # систематической отладкой бага громкости (см. airadar/augment/
+        # mixing.py:normalize_rms), не имеют этого поля в aug_cfg вовсе
+        self.target_rms = ck["aug_cfg"].get("target_rms", 0.05)
 
         self.frontend = Frontend(feature_cfg).to(device)
         self.model = DroneNet2(model_cfg).to(device)
@@ -133,12 +137,16 @@ class DroneNet2Scorer:
 
     def score(self, audio, bs=16):
         torch = self._torch
+        from airadar.augment.mixing import normalize_rms
         ctx = int(round(self.context_s * self._sr))
         hop = int(round(self.hop_s * self._sr))
         n = n_scores(len(audio), self.context_s, self.hop_s, sr=self._sr)
         if n == 0:
             return np.zeros(0, np.float32)
         win = np.stack([audio[i * hop:i * hop + ctx] for i in range(n)])
+        # тот же RMS-таргет, что видела модель на обучении (airadar/train/
+        # sampler.py) — иначе train/inference расходятся по громкости
+        win = normalize_rms(win, target_rms=self.target_rms)
         out = np.empty(n, np.float32)
         with torch.no_grad():
             for i in range(0, n, bs):
@@ -186,7 +194,7 @@ def selfcheck():
     # DroneNet2Scorer: синтетический чекпоинт (случайные веса, как в
     # airadar/train/checkpoint.py:selfcheck), проверка контракта Scorer
     import tempfile
-    from airadar.train.checkpoint import save_checkpoint
+    from airadar.train.checkpoint import save_checkpoint, load_checkpoint
     from airadar.config import FeatureCfg, ModelCfg, AugCfg, TrainCfg
     from airadar.models.dronenet2 import DroneNet2
 
@@ -210,6 +218,30 @@ def selfcheck():
         s2_custom_hop = DroneNet2Scorer(ckpt_path, device="cpu", hop_s=2.0)
         assert s2_custom_hop.hop_s == 2.0
         assert check_scorer(s2_custom_hop, n_samples=SR * 15) >= 1
+
+        assert s2.target_rms == AugCfg().target_rms == 0.05
+
+        # инвариантность к громкости: тот же сигнал, отмасштабированный в
+        # 20 раз, обязан дать тот же ряд оценок — RMS-нормализация внутри
+        # score() должна это гарантировать (см. airadar/augment/mixing.py:
+        # normalize_rms; систематическая отладка нашла реальный чекпоинт,
+        # где ДО этой нормализации логит менялся на противоположный знак
+        # от одного усиления громкости без изменения содержимого)
+        rng = np.random.default_rng(0)
+        audio = rng.standard_normal(SR * 15).astype(np.float32) * 0.02
+        out_1x = s2.score(audio)
+        out_20x = s2.score(audio * 20.0)
+        assert np.allclose(out_1x, out_20x, atol=1e-3), \
+            (np.abs(out_1x - out_20x).max(), "score обязан быть инвариантен к громкости входа")
+
+        # чекпоинт БЕЗ target_rms в aug_cfg (сохранён до этого фикса) —
+        # обязан откатиться на дефолт 0.05, а не упасть
+        ck_old = load_checkpoint(ckpt_path)
+        del ck_old["aug_cfg"]["target_rms"]
+        import torch as _torch
+        _torch.save(ck_old, ckpt_path)
+        s2_old = DroneNet2Scorer(ckpt_path, device="cpu")
+        assert s2_old.target_rms == 0.05
 
     print("scorer selfcheck ok")
 

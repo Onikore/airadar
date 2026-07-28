@@ -66,6 +66,7 @@ class AugCfg:
     air_k_max: float = 2.5
     spec_mask_n: int = 2
     spec_mask_frac: float = 1.0 / 6.0
+    target_rms: float = 0.05         # финальная RMS-нормализация, см. augment/mixing.py
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,7 @@ def selfcheck():
     assert ac.pitch_r_lo == 0.35 and ac.pitch_r_hi == 1.5
     assert ac.snr_db_lo == -15.0 and ac.snr_db_hi == 20.0
     assert ac.hum_amp_max == 0.8
+    assert ac.target_rms == 0.05
 
     tc = TrainCfg()
     assert tc.model_samples == 64000 and tc.target_samples == 192000

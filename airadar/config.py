@@ -50,9 +50,17 @@ class ModelCfg:
 class AugCfg:
     """Диапазоны аугментации (§4). pitch_prob/hum_prob/hum_only_prob —
     инженерное решение этого плана (спецификация задаёт диапазоны и
-    эффекты, не частоту применения)."""
+    эффекты, не частоту применения).
+
+    pitch_r_hi поднят с 1.5 до 3.0 (2026-07-28, вместе с F0_HI в
+    harmonic.py) — реальная FPV-запись показала стабильную доминанту
+    ~390-400 Гц, а типичный квадрокоптер обучающих данных — ~150-250 Гц.
+    r=1.5 давал максимум ~225-375 Гц, не дотягиваясь до FPV-диапазона;
+    r=3.0 даёт до ~450-750 Гц — не строгий вывод (природа реальных FPV
+    частот не промерена массово, только на одной записи), инженерная
+    оценка с запасом."""
     pitch_r_lo: float = 0.35
-    pitch_r_hi: float = 1.5
+    pitch_r_hi: float = 3.0
     pitch_prob: float = 0.7          # доля позитивов со сдвинутым f0
     snr_db_lo: float = -15.0
     snr_db_hi: float = 20.0
@@ -101,7 +109,7 @@ def selfcheck():
     assert mc.branch_hidden == 128 and mc.mil_hidden == 16
 
     ac = AugCfg()
-    assert ac.pitch_r_lo == 0.35 and ac.pitch_r_hi == 1.5
+    assert ac.pitch_r_lo == 0.35 and ac.pitch_r_hi == 3.0
     assert ac.snr_db_lo == -15.0 and ac.snr_db_hi == 20.0
     assert ac.hum_amp_max == 0.8
     assert ac.target_rms == 0.05

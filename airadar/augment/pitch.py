@@ -1,7 +1,10 @@
-"""f0-сдвиг позитивов (§4.1): ресемплинг с коэффициентом r ∈ [0.35, 1.5]
-размазывает f0 обучающей массы по диапазону 40-400 Гц. На лог-оси это
-ровно трансляция (тот же принцип, что делает harmonic stacking
-f0-независимым, см. airadar/features/harmonic.py).
+"""f0-сдвиг позитивов (§4.1): ресемплинг с коэффициентом r (по умолчанию
+AugCfg.pitch_r_lo..pitch_r_hi = 0.35..3.0) размазывает f0 обучающей массы
+по диапазону 40-800 Гц (верхняя граница поднята 2026-07-28 — см.
+airadar/features/harmonic.py и AugCfg — под FPV-дроны с частотой
+пропеллера выше типичного квадрокоптера). На лог-оси это ровно трансляция
+(тот же принцип, что делает harmonic stacking f0-независимым, см.
+airadar/features/harmonic.py).
 
 Порядок обязателен (§4.1): сдвигается ЧИСТЫЙ позитив, ДО подмешивания
 фона (airadar/augment/mixing.py, airadar/train/sampler.py) — иначе вместе
@@ -50,10 +53,12 @@ def selfcheck():
     assert len(unchanged) == len(tone), (len(unchanged), len(tone))
 
     # sample_r: диапазон соблюдён, детерминирован при фиксированном seed
+    from airadar.config import AugCfg
+    cfg = AugCfg()
     rng = np.random.default_rng(0)
     rs = [sample_r(rng) for _ in range(200)]
-    assert all(0.35 <= r <= 1.5 for r in rs)
-    assert min(rs) < 0.5 and max(rs) > 1.3   # диапазон реально используется целиком
+    assert all(cfg.pitch_r_lo <= r <= cfg.pitch_r_hi for r in rs)
+    assert min(rs) < 0.5 and max(rs) > cfg.pitch_r_hi - 0.3   # диапазон реально используется целиком
 
     print("pitch selfcheck ok")
 

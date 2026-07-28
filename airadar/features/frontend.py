@@ -23,6 +23,10 @@ class Frontend(torch.nn.Module):
         self.cfg = cfg or FeatureCfg()
         self._logcqt = LogCQT(self.cfg)
 
+    @property
+    def frequencies(self):
+        return self._logcqt.frequencies
+
     def forward(self, wav):
         ch0 = self._logcqt(wav)                                       # [B, F, T]
         ch1 = ch0 - rolling_percentile_causal(

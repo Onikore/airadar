@@ -627,6 +627,9 @@ def main(manifest_path, clips_path, epochs=3, bs=32, lr=3e-4, out_dir="models",
         print(f"эпоха {ep+1}/{epochs}  train_loss {tr_loss:.4f}  val_loss {va_loss:.4f}  "
               f"{dt:.1f}с{tag}", flush=True)
 
+    ds_tr.close()
+    ds_va.close()
+
 
 def selfcheck():
     """Проверяет arifметику pos_weight/neg_pool на синтетическом манифесте
@@ -659,7 +662,8 @@ def selfcheck():
         pq.write_table(table, manifest_path)
 
         pw = pos_weight_for(manifest_path, split=0)
-        assert abs(pw - 2 / 3) < 1e-6, pw   # train: label1=3,label0=2 (индексы 0-4) -> 2/3
+        # train = индексы 0-4 (split=0): label [1,1,1,1,0] -> n_pos=4, n_neg=1 -> pw=1/4
+        assert abs(pw - 0.25) < 1e-6, pw
 
         neg_pool = build_neg_pool(manifest_path, split=0)
         assert neg_pool.shape[1] == 2 and len(neg_pool) == 1   # один негатив в train (индекс 4)

@@ -120,7 +120,7 @@ def eval_epoch(model, frontend, loader, bce, device):
 
 
 def main(manifest_path, clips_path, epochs=3, bs=32, lr=3e-4, out_dir="models",
-        limit=None, device=None):
+        limit=None, device=None, run_name="dronenet2", save_every_epoch=False):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     feature_cfg, model_cfg, aug_cfg, train_cfg = FeatureCfg(), ModelCfg(), AugCfg(), TrainCfg()
 
@@ -174,13 +174,21 @@ def main(manifest_path, clips_path, epochs=3, bs=32, lr=3e-4, out_dir="models",
         tag = ""
         if va_loss < best_val:
             best_val = va_loss
-            save_checkpoint(os.path.join(out_dir, "dronenet2_best.pt"), model, opt, sched,
+            save_checkpoint(os.path.join(out_dir, f"{run_name}_best.pt"), model, opt, sched,
                             ep + 1, feature_cfg, model_cfg, aug_cfg, train_cfg,
                             manifest_path, extra={"val_loss": va_loss})
             tag = "  <- saved"
-        save_checkpoint(os.path.join(out_dir, "dronenet2_last.pt"), model, opt, sched,
+        save_checkpoint(os.path.join(out_dir, f"{run_name}_last.pt"), model, opt, sched,
                         ep + 1, feature_cfg, model_cfg, aug_cfg, train_cfg,
                         manifest_path, extra={"val_loss": va_loss})
+        if save_every_epoch:
+            # По эпохе на файл (этап 3г ещё не отбирает чекпоинт по SNR50 —
+            # временный критерий val BCE, §6.3, отдельная задача); история
+            # по эпохам даёт возможность пересчитать лучший постфактум через
+            # bench-харнес, не перезапуская обучение.
+            save_checkpoint(os.path.join(out_dir, f"{run_name}_ep{ep+1:03d}.pt"),
+                            model, opt, sched, ep + 1, feature_cfg, model_cfg,
+                            aug_cfg, train_cfg, manifest_path, extra={"val_loss": va_loss})
         print(f"эпоха {ep+1}/{epochs}  train_loss {tr_loss:.4f}  val_loss {va_loss:.4f}  "
               f"{dt:.1f}с{tag}", flush=True)
 

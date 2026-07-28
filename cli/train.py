@@ -30,6 +30,8 @@ if __name__ == "__main__":
     ap.add_argument("--save-every-epoch", action="store_true")
     ap.add_argument("--seed", type=int, default=None,
                     help="фиксирует torch/numpy RNG перед стартом — для 2 seed §9")
+    ap.add_argument("--num-workers", type=int, default=0,
+                    help="параллельные процессы DataLoader — прячет I/O clips.bin за GPU")
     a = ap.parse_args()
 
     if a.seed is not None:
@@ -38,4 +40,4 @@ if __name__ == "__main__":
 
     main(MANIFEST_PATH, CLIPS_PATH, epochs=a.epochs, bs=a.bs, lr=a.lr,
         out_dir=a.out_dir, limit=a.limit, run_name=a.run_name,
-        save_every_epoch=a.save_every_epoch)
+        save_every_epoch=a.save_every_epoch, num_workers=a.num_workers)

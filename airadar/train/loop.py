@@ -11,6 +11,7 @@ SNR50 худшей f0-полосы (§6.3) — отдельная задача �
 import sys
 import os
 import time
+from functools import partial
 import numpy as np
 import torch
 import torch.nn as nn
@@ -120,7 +121,8 @@ def eval_epoch(model, frontend, loader, bce, device):
 
 
 def main(manifest_path, clips_path, epochs=3, bs=32, lr=3e-4, out_dir="models",
-        limit=None, device=None, run_name="dronenet2", save_every_epoch=False):
+        limit=None, device=None, run_name="dronenet2", save_every_epoch=False,
+        num_workers=0):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     feature_cfg, model_cfg, aug_cfg, train_cfg = FeatureCfg(), ModelCfg(), AugCfg(), TrainCfg()
 
@@ -146,9 +148,29 @@ def main(manifest_path, clips_path, epochs=3, bs=32, lr=3e-4, out_dir="models",
                             cols["label"][va_sel], cols["clip_id"][va_sel],
                             clips_path, neg_pool_va, aug_cfg, train_cfg, deterministic=True)
 
-    collate = lambda items: collate_batch(items, train_cfg.target_samples)
-    ld_tr = torch.utils.data.DataLoader(ds_tr, batch_size=bs, shuffle=True, collate_fn=collate)
-    ld_va = torch.utils.data.DataLoader(ds_va, batch_size=bs, shuffle=False, collate_fn=collate)
+    # num_workers>0 перекрывает I/O чтения clips.bin (17.9 ГБ, случайный
+    # доступ) вычислением на GPU. Измерено (не угадано): без воркеров
+    # цена шага растёт с размером затронутого рабочего множества — 195мс
+    # на 6.25k строк, 397мс на 50k, 455мс на полном наборе (172k) — это
+    # промах кэша страниц ОС на случайном доступе к файлу, который целиком
+    # в кэше не помещается вместе с остальными процессами машины, не рост
+    # стоимости вычисления самого по себе (см. коммит с этим комментарием).
+    # ManifestDataset открывает ClipReader лениво (self._reader = None до
+    # первого __getitem__) специально для этого: воркер, порождённый через
+    # spawn (Windows), получает несвязанный экземпляр Dataset и открывает
+    # СВОЙ memmap, не пытаясь передать чужой открытый файловый дескриптор
+    # через границу процесса.
+    # functools.partial над функцией МОДУЛЬНОГО уровня, не lambda: lambda,
+    # объявленная внутри main(), не пиклится (Windows spawn для
+    # num_workers>0 сериализует collate_fn для передачи в дочерний
+    # процесс) — поймано реальным прогоном с num_workers=4, не угадано.
+    collate = partial(collate_batch, target_samples=train_cfg.target_samples)
+    dl_kwargs = dict(num_workers=num_workers, persistent_workers=num_workers > 0,
+                     pin_memory=(device == "cuda"))
+    ld_tr = torch.utils.data.DataLoader(ds_tr, batch_size=bs, shuffle=True,
+                                        collate_fn=collate, **dl_kwargs)
+    ld_va = torch.utils.data.DataLoader(ds_va, batch_size=bs, shuffle=False,
+                                        collate_fn=collate, **dl_kwargs)
 
     frontend = Frontend(feature_cfg).to(device)
     model = DroneNet2(model_cfg).to(device)

@@ -17,13 +17,16 @@ MODEL_FRAMES = 32   # 4.0 с — контекст модели, см. airadar.fe
 
 
 class Frontend(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, cfg=None):
         super().__init__()
-        self._logcqt = LogCQT()
+        from airadar.config import FeatureCfg
+        self.cfg = cfg or FeatureCfg()
+        self._logcqt = LogCQT(self.cfg)
 
     def forward(self, wav):
         ch0 = self._logcqt(wav)                                       # [B, F, T]
-        ch1 = ch0 - rolling_percentile_causal(ch0, BG_WINDOW_FRAMES, BG_QUANTILE)
+        ch1 = ch0 - rolling_percentile_causal(
+            ch0, self.cfg.bg_window_frames, self.cfg.bg_quantile)
         return torch.stack([ch0, ch1], dim=1)                         # [B, 2, F, T]
 
     @staticmethod

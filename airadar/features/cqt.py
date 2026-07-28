@@ -25,14 +25,22 @@ class LogCQT(torch.nn.Module):
 
     trainable=False — фронтенд не участвует в обратном проходе, как и
     нынешний ручной LogMel (его mel-банк тоже не обучается).
+
+    cfg=None -> airadar.config.FeatureCfg() по умолчанию, что воспроизводит
+    прежнее поведение (глобалы этого модуля остаются для обратной
+    совместимости — их использует, например, airadar/bench/feat_visibility.py
+    и airadar/features/harmonic.py по прямому импорту, менять их нельзя).
     """
 
-    def __init__(self):
+    def __init__(self, cfg=None):
         super().__init__()
+        from airadar.config import FeatureCfg
+        self.cfg = cfg or FeatureCfg()
         from nnAudio.features import CQT2010v2
         self._cqt = CQT2010v2(
-            sr=SR, hop_length=HOP_LENGTH, fmin=FMIN, fmax=FMAX,
-            n_bins=N_BINS, bins_per_octave=BINS_PER_OCTAVE,
+            sr=self.cfg.sr, hop_length=self.cfg.hop_length,
+            fmin=self.cfg.fmin, fmax=self.cfg.fmax,
+            n_bins=self.cfg.n_bins, bins_per_octave=self.cfg.bins_per_octave,
             output_format="Magnitude", trainable=False, verbose=False,
         )
 

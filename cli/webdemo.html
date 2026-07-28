@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>AirRadar — тест по микрофону</title>
+<style>
+  body {
+    font-family: system-ui, sans-serif;
+    background: #12141a;
+    color: #e6e6e6;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem 1rem;
+    margin: 0;
+  }
+  h1 { font-size: 1.2rem; color: #9aa; font-weight: normal; }
+  #status {
+    width: min(420px, 90vw);
+    aspect-ratio: 1.6;
+    border-radius: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-size: 2rem;
+    font-weight: bold;
+    transition: background 0.3s ease;
+    background: #2a2d36;
+    border: 2px solid #3a3d46;
+  }
+  #status.drone { background: #5c1a1a; border-color: #ff4444; }
+  #status.nodrone { background: #1a3d1a; border-color: #44cc44; }
+  #status .prob { font-size: 3rem; margin: 0.3rem 0; }
+  #status .sub { font-size: 0.9rem; font-weight: normal; color: #ccc; }
+  button {
+    margin-top: 1.5rem;
+    padding: 0.8rem 2rem;
+    font-size: 1.1rem;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    background: #3a6ea5;
+    color: white;
+  }
+  button.listening { background: #a53a3a; }
+  #log {
+    margin-top: 1.5rem;
+    width: min(420px, 90vw);
+    max-height: 200px;
+    overflow-y: auto;
+    font-size: 0.8rem;
+    color: #999;
+    font-family: monospace;
+  }
+  #log div { padding: 2px 0; border-bottom: 1px solid #222; }
+  #err { color: #ff8888; margin-top: 1rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+  <h1>AirRadar — вердикт DroneNet2 по звуку с микрофона</h1>
+  <div id="status">
+    <div class="prob">—</div>
+    <div class="sub">нажми "Слушать"</div>
+  </div>
+  <button id="toggle">Слушать</button>
+  <div id="err"></div>
+  <div id="log"></div>
+
+<script>
+const CHUNK_SECONDS = 4.0;
+let audioContext, processor, source, stream;
+let buffer = [];
+let bufferedSamples = 0;
+let listening = false;
+let busy = false;
+
+const statusEl = document.getElementById('status');
+const toggleBtn = document.getElementById('toggle');
+const logEl = document.getElementById('log');
+const errEl = document.getElementById('err');
+
+function floatTo16BitPCM(view, offset, input) {
+  for (let i = 0; i < input.length; i++, offset += 2) {
+    let s = Math.max(-1, Math.min(1, input[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+}
+
+function encodeWAV(samples, sampleRate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buf);
+  const writeString = (offset, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  floatTo16BitPCM(view, 44, samples);
+  return new Blob([view], { type: 'audio/wav' });
+}
+
+function mergeBuffers(chunks, total) {
+  const out = new Float32Array(total);
+  let offset = 0;
+  for (const c of chunks) { out.set(c, offset); offset += c.length; }
+  return out;
+}
+
+function updateUI(data) {
+  const pct = Math.round(data.prob * 100);
+  statusEl.querySelector('.prob').textContent = pct + '%';
+  statusEl.querySelector('.sub').textContent =
+    `логит ${data.logit.toFixed(2)} · f0≈${data.f0_hat.toFixed(0)}Гц · salience ${data.salience.toFixed(1)}дБ`;
+  statusEl.classList.toggle('drone', data.prob >= 0.5);
+  statusEl.classList.toggle('nodrone', data.prob < 0.5);
+
+  const t = new Date().toLocaleTimeString();
+  const row = document.createElement('div');
+  row.textContent = `${t}  prob=${data.prob.toFixed(3)}  logit=${data.logit.toFixed(2)}  f0=${data.f0_hat.toFixed(0)}Гц`;
+  logEl.prepend(row);
+  while (logEl.children.length > 30) logEl.removeChild(logEl.lastChild);
+}
+
+async function sendChunk(samples, sampleRate) {
+  if (busy) return;
+  busy = true;
+  try {
+    const blob = encodeWAV(samples, sampleRate);
+    const resp = await fetch('/predict', { method: 'POST', body: blob });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    updateUI(data);
+    errEl.textContent = '';
+  } catch (e) {
+    errEl.textContent = 'ошибка запроса: ' + e.message;
+  } finally {
+    busy = false;
+  }
+}
+
+async function start() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    errEl.textContent = 'нет доступа к микрофону: ' + e.message;
+    return;
+  }
+  audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  source = audioContext.createMediaStreamSource(stream);
+  processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+  // тихий гейн — держит граф обработки "живым" во всех браузерах, но
+  // ничего не пускает на колонки (gain=0), без этого эха/фидбека не будет,
+  // но в части браузеров onaudioprocess может не тикать без connect дальше
+  const silentGain = audioContext.createGain();
+  silentGain.gain.value = 0;
+
+  source.connect(processor);
+  processor.connect(silentGain);
+  silentGain.connect(audioContext.destination);
+
+  buffer = [];
+  bufferedSamples = 0;
+  const sr = audioContext.sampleRate;
+  const targetSamples = Math.round(sr * CHUNK_SECONDS);
+
+  processor.onaudioprocess = (e) => {
+    if (!listening) return;
+    const input = e.inputBuffer.getChannelData(0);
+    buffer.push(new Float32Array(input));
+    bufferedSamples += input.length;
+    if (bufferedSamples >= targetSamples) {
+      const merged = mergeBuffers(buffer, bufferedSamples);
+      buffer = [];
+      bufferedSamples = 0;
+      sendChunk(merged, sr);
+    }
+  };
+
+  listening = true;
+  toggleBtn.textContent = 'Остановить';
+  toggleBtn.classList.add('listening');
+  statusEl.querySelector('.sub').textContent = 'слушаю...';
+}
+
+function stop() {
+  listening = false;
+  if (processor) processor.disconnect();
+  if (source) source.disconnect();
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (audioContext) audioContext.close();
+  toggleBtn.textContent = 'Слушать';
+  toggleBtn.classList.remove('listening');
+  statusEl.classList.remove('drone', 'nodrone');
+  statusEl.querySelector('.sub').textContent = 'остановлено';
+}
+
+toggleBtn.onclick = () => {
+  if (listening) stop(); else start();
+};
+</script>
+</body>
+</html>

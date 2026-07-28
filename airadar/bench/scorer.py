@@ -10,6 +10,7 @@
 рабочая точка.
 """
 
+import os
 import sys
 from typing import Protocol
 
@@ -99,6 +100,55 @@ class LegacyScorer:
         return out
 
 
+class DroneNet2Scorer:
+    """DroneNet2 (этап 3) за фасадом Scorer.
+
+    context_s берётся из чекпоинта (TrainCfg.target_samples / FeatureCfg.sr,
+    обычно 12.0с — 8с истории + 4с окна модели), не задаётся руками: это
+    контекст, для которого архитектура спроектирована (этап 2/3а), а не
+    произвольный выбор бенча.
+    """
+
+    def __init__(self, ckpt_path, device="cpu", hop_s=1.0):
+        import torch
+        from airadar.train.checkpoint import load_checkpoint
+        from airadar.config import FeatureCfg, ModelCfg
+        from airadar.features.frontend import Frontend
+        from airadar.models.dronenet2 import DroneNet2
+
+        self._torch = torch
+        ck = load_checkpoint(ckpt_path, device=device)
+        feature_cfg = FeatureCfg(**ck["feature_cfg"])
+        model_cfg = ModelCfg(**ck["model_cfg"])
+
+        self.hop_s = hop_s
+        self.context_s = ck["train_cfg"]["target_samples"] / feature_cfg.sr
+
+        self.frontend = Frontend(feature_cfg).to(device)
+        self.model = DroneNet2(model_cfg).to(device)
+        self.model.load_state_dict(ck["model"])
+        self.model.eval()
+        self.device = device
+        self._sr = feature_cfg.sr
+
+    def score(self, audio, bs=16):
+        torch = self._torch
+        ctx = int(round(self.context_s * self._sr))
+        hop = int(round(self.hop_s * self._sr))
+        n = n_scores(len(audio), self.context_s, self.hop_s, sr=self._sr)
+        if n == 0:
+            return np.zeros(0, np.float32)
+        win = np.stack([audio[i * hop:i * hop + ctx] for i in range(n)])
+        out = np.empty(n, np.float32)
+        with torch.no_grad():
+            for i in range(0, n, bs):
+                x = torch.from_numpy(win[i:i + bs]).to(self.device).float()
+                feat = self.frontend(x)
+                feat = self.frontend.last_model_frames(feat)
+                out[i:i + bs] = self.model(feat)["clip_logit"].cpu().numpy()
+        return out
+
+
 def selfcheck():
     # длина ряда оценок: первое окно занимает context, дальше шаг hop
     assert n_scores(8000, 0.5, 0.25) == 1          # ровно одно окно
@@ -132,6 +182,34 @@ def selfcheck():
         pass
     else:
         raise AssertionError("check_scorer не поймал неверную длину ряда")
+
+    # DroneNet2Scorer: синтетический чекпоинт (случайные веса, как в
+    # airadar/train/checkpoint.py:selfcheck), проверка контракта Scorer
+    import tempfile
+    from airadar.train.checkpoint import save_checkpoint
+    from airadar.config import FeatureCfg, ModelCfg, AugCfg, TrainCfg
+    from airadar.models.dronenet2 import DroneNet2
+
+    with tempfile.TemporaryDirectory() as d:
+        manifest_path = os.path.join(d, "fake_manifest.bin")
+        with open(manifest_path, "wb") as f:
+            f.write(b"fake")
+        ckpt_path = os.path.join(d, "dn2.pt")
+        model = DroneNet2(ModelCfg())
+        save_checkpoint(ckpt_path, model, opt=None, sched=None, epoch=0,
+                        feature_cfg=FeatureCfg(), model_cfg=ModelCfg(),
+                        aug_cfg=AugCfg(), train_cfg=TrainCfg(),
+                        manifest_path=manifest_path)
+
+        s2 = DroneNet2Scorer(ckpt_path, device="cpu")
+        assert s2.context_s == TrainCfg().target_samples / FeatureCfg().sr
+        assert s2.hop_s == 1.0
+        # 15с > context_s (12с) -> хотя бы одна оценка реально считается
+        assert check_scorer(s2, n_samples=SR * 15) >= 1
+
+        s2_custom_hop = DroneNet2Scorer(ckpt_path, device="cpu", hop_s=2.0)
+        assert s2_custom_hop.hop_s == 2.0
+        assert check_scorer(s2_custom_hop, n_samples=SR * 15) >= 1
 
     print("scorer selfcheck ok")
 

@@ -46,6 +46,38 @@ class ModelCfg:
     mil_hidden: int = 16
 
 
+@dataclass(frozen=True)
+class AugCfg:
+    """Диапазоны аугментации (§4). pitch_prob/hum_prob/hum_only_prob —
+    инженерное решение этого плана (спецификация задаёт диапазоны и
+    эффекты, не частоту применения)."""
+    pitch_r_lo: float = 0.35
+    pitch_r_hi: float = 1.5
+    pitch_prob: float = 0.7          # доля позитивов со сдвинутым f0
+    snr_db_lo: float = -15.0
+    snr_db_hi: float = 20.0
+    gain_db_lo: float = -6.0
+    gain_db_hi: float = 6.0
+    hum_amp_max: float = 0.8
+    hum_f0_lo: float = 49.8
+    hum_f0_hi: float = 50.2
+    hum_prob: float = 0.3            # доля примеров с подмешанным гулом
+    hum_only_prob: float = 0.05      # доля НЕГАТИВОВ, заменяемых на чистый гул
+    air_k_max: float = 2.5
+    spec_mask_n: int = 2
+    spec_mask_frac: float = 1.0 / 6.0
+
+
+@dataclass(frozen=True)
+class TrainCfg:
+    """Длины окна сборки примера, отсчёты при 16 кГц. target_samples —
+    8с истории (BG_WINDOW_FRAMES) + 4с окна модели (MODEL_FRAMES), см.
+    airadar/features/frontend.py, этап 2. model_samples — минимум, ниже
+    которого Frontend.last_model_frames не наберёт MODEL_FRAMES кадров."""
+    model_samples: int = 64000    # 4.0с
+    target_samples: int = 192000  # 12.0с
+
+
 def selfcheck():
     cfg = FeatureCfg()
     assert cfg.hop_length == 2048, cfg.hop_length   # совпадает с cqt.HOP_LENGTH
@@ -66,6 +98,14 @@ def selfcheck():
 
     mc = ModelCfg()
     assert mc.branch_hidden == 128 and mc.mil_hidden == 16
+
+    ac = AugCfg()
+    assert ac.pitch_r_lo == 0.35 and ac.pitch_r_hi == 1.5
+    assert ac.snr_db_lo == -15.0 and ac.snr_db_hi == 20.0
+    assert ac.hum_amp_max == 0.8
+
+    tc = TrainCfg()
+    assert tc.model_samples == 64000 and tc.target_samples == 192000
 
     print("config selfcheck ok")
 

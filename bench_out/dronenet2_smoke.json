@@ -1,0 +1,108 @@
+{
+  "name": "dronenet2_smoke",
+  "hop_s": 1.0,
+  "context_s": 12.0,
+  "operating_point": {
+    "fa_budget_per_hour": 1.0,
+    "tau_s": 2.0,
+    "background_hours_total": 0.4949861111111111,
+    "background_hours_scored": 0.10444444444444445,
+    "seam_mask_kept_raw": 0.37175141242937854,
+    "seam_mask_kept_smoothed": 0.21242937853107344,
+    "fa_resolution_per_hour": 9.574468085106382,
+    "expected_events_at_budget": 0.10444444444444445,
+    "min_expected_events": 5.0,
+    "threshold_calibrated": false,
+    "threshold_source": "unresolvable_corpus",
+    "on": null,
+    "off": null,
+    "fa_actual": null,
+    "reason": "недостаточно фона для честного FA/час при tau=2.0 с: 0.104 ч зачтённого фона при бюджете 1.0 тревог/час дают ожидаемо 0.10 события, нужно не меньше 5. Уложиться в бюджет можно только нулём событий, а ноль недостижим любым порогом из ряда — нужен непрерывный корпус из исходников (этап 4 плана)"
+  },
+  "snr50": {
+    "defined": false,
+    "reason": "недостаточно фона для честного FA/час при tau=2.0 с: 0.104 ч зачтённого фона при бюджете 1.0 тревог/час дают ожидаемо 0.10 события, нужно не меньше 5. Уложиться в бюджет можно только нулём событий, а ноль недостижим любым порогом из ряда — нужен непрерывный корпус из исходников (этап 4 плана)"
+  },
+  "field": {
+    "drone_video1.wav": {
+      "n_windows": 27,
+      "auc_fh": 0.3188674997185635,
+      "auc_fh_ci": [
+        0.10962794101091981,
+        0.5330420466058761
+      ],
+      "median_pct": 0.21580547112462006
+    },
+    "drone_video2.wav": {
+      "n_windows": 37,
+      "auc_fh": 0.04924833648237903,
+      "auc_fh_ci": [
+        0.02098496672964757,
+        0.08571839316520159
+      ],
+      "median_pct": 0.0182370820668693
+    }
+  },
+  "transfer": {
+    "threshold": -3.5355697059631352,
+    "far_nominal": 0.01,
+    "far_actual": 0.0,
+    "ratio": 0.0,
+    "drift_p99": -1.024078752377925
+  },
+  "strata": {
+    "defined": false,
+    "reason": "недостаточно фона для честного FA/час при tau=2.0 с: 0.104 ч зачтённого фона при бюджете 1.0 тревог/час дают ожидаемо 0.10 события, нужно не меньше 5. Уложиться в бюджет можно только нулём событий, а ноль недостижим любым порогом из ряда — нужен непрерывный корпус из исходников (этап 4 плана)",
+    "n_by_band": {
+      "40-80": 103,
+      "80-120": 58,
+      "120-200": 354,
+      "200-300": 203,
+      "300+": 35
+    },
+    "n_windows": 753
+  },
+  "provenance": {
+    "model_path": "models/dronenet2_last.pt",
+    "seed": 0,
+    "git_sha": "58ba6b51c873417354e38617a80bd3e4ea0053ac",
+    "git_dirty": false,
+    "fa_budget_per_hour": 1.0,
+    "off_delta": 1.0,
+    "tau_s": 2.0,
+    "nominal_far": 0.01,
+    "min_expected_events": 5.0,
+    "n_rep": 32,
+    "n_boot_snr50": 1000,
+    "hard_categories": [
+      "air_conditioner",
+      "airplane",
+      "chainsaw",
+      "crackling_fire",
+      "drilling",
+      "engine",
+      "engine_idling",
+      "hand_saw",
+      "helicopter",
+      "jackhammer",
+      "rain",
+      "thunderstorm",
+      "train",
+      "vacuum_cleaner",
+      "washing_machine",
+      "wind"
+    ],
+    "n_hard_categories": 16,
+    "corpus": {
+      "hard_holdout_windows": 3580,
+      "clips_after_regroup": 162,
+      "track_samples": 28511200,
+      "track_windows": 1770,
+      "windows_kept_raw": 658,
+      "windows_kept_smoothed": 376,
+      "windows_masked_out_raw": 1112,
+      "windows_masked_out_smoothed": 1394
+    }
+  },
+  "nan_fields": []
+}

@@ -153,7 +153,14 @@ def main(manifest_path, clips_path, epochs=3, bs=32, lr=3e-4, out_dir="models",
     frontend = Frontend(feature_cfg).to(device)
     model = DroneNet2(model_cfg).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    steps = max(epochs * (len(ds_tr) // bs), 1)
+    # ceil, не floor: DataLoader(drop_last=False, по умолчанию) отдаёт
+    # укороченный последний батч, а не отбрасывает его -- при floor-делении
+    # реальных шагов за эпоху оказывается на один больше бюджета, и на
+    # многоэпоховом прогоне OneCycleLR переполняется на последней эпохе
+    # (поймано реальным прогоном на 2000 строк, не селфчеком: там размер
+    # датасета случайно делился на bs без остатка и баг был не виден)
+    steps_per_epoch = -(-len(ds_tr) // bs)
+    steps = max(epochs * steps_per_epoch, 1)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, lr, total_steps=steps)
     bce = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pw], device=device))
 

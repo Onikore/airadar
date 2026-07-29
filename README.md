@@ -167,15 +167,47 @@ bench-sweep'ом, не автовыбором `train.py`).
 
 ---
 
-## Команды
+## Быстрый старт
 
-Подробный разбор — [RUNBOOK.md](RUNBOOK.md). Коротко:
+Полный разбор (bench-sweep, диагностика, легаси-пайплайн, узкие места) —
+[RUNBOOK.md](RUNBOOK.md). Здесь — минимум, чтобы с нуля на новой машине
+дойти до собранного датасета и обученной модели.
 
 ```bash
-python cli/selfcheck.py                 # вся логика без данных и без GPU, 33+ проверки
-python cli/build_manifest.py --limit 1  # сборка манифеста, сначала на пробу
-python cli/build_manifest.py            # полная сборка — часы
+git clone https://github.com/Onikore/airadar.git
+cd airadar
 
+pip install numpy scipy soundfile pyarrow huggingface_hub flask nnAudio==0.3.4
+pip install torch --index-url https://download.pytorch.org/whl/cu121   # под свою CUDA
+# без GPU:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+python cli/selfcheck.py     # вся логика пакета без данных и без GPU, 33+ проверки
+```
+
+Нет `requirements.txt` — список выше собран прямым обходом импортов; версии
+не запиновены нигде, кроме `nnAudio==0.3.4` (число кадров признака измерено
+под конкретную версию).
+
+**Токен HuggingFace обязателен** — `hub.py:token()` явно падает без него,
+анонимного доступа код не поддерживает, даже если сами датасеты публичные:
+
+```bash
+export HF_TOKEN=hf_...   # создать на huggingface.co/settings/tokens, права read
+```
+
+Датасет — не файл для скачивания, а манифест+хранилище клипов, собираемые с
+нуля из четырёх источников HF (см. «Данные» ниже) и не хранящиеся в git:
+
+```bash
+python cli/build_manifest.py --limit 1   # проба на одном шарде источника
+python cli/build_manifest.py             # полная сборка — часы, IO-связано,
+                                          # безопасно прерывать и продолжать (чекпоинт по шардам)
+python cli/manifest_audit.py             # проверка целостности manifest.parquet/clips.bin
+```
+
+Дальше — обучение и живой тест:
+
+```bash
 python cli/train.py --epochs 15 --bs 32 --run-name my_run \
     --save-every-epoch --seed 0 --num-workers 4
 python cli/bench.py --model models/my_run_ep014.pt --name my_run_ep014 --arch dronenet2

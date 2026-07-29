@@ -27,15 +27,43 @@ taskkill //PID <pid> //F               # остановить конкретны
 
 ---
 
-## Пайплайн с нуля
-
-Нужен `data/manifest.parquet` + `data/clips.bin` — собираются из четырёх
-источников HuggingFace (см. README, раздел «Данные»), доступ анонимный (все
-источники публичные).
+## Установка на новой машине
 
 ```bash
-python cli/selfcheck.py                     # вся логика без данных/GPU, 33+ проверки — прогнать первым
+git clone https://github.com/Onikore/airadar.git
+cd airadar
 
+pip install numpy scipy soundfile pyarrow huggingface_hub flask nnAudio==0.3.4
+pip install torch --index-url https://download.pytorch.org/whl/cu121   # под свою версию CUDA
+# без GPU — CPU-сборка:
+# pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+python cli/selfcheck.py     # вся логика пакета без данных и без GPU, 33+ проверки — обязательно прогнать первым
+```
+
+Нет `requirements.txt` — список выше собран прямым обходом импортов, версии
+не запиновены нигде в коде кроме `nnAudio==0.3.4` (число кадров признака
+измерено под конкретную версию, см. `airadar/features/cqt.py`).
+
+**Токен HuggingFace обязателен** — `hub.py:token()` явно падает без него,
+анонимный доступ не поддержан кодом (даже если все четыре датасета публичные):
+
+```bash
+export HF_TOKEN=hf_...   # создать на huggingface.co/settings/tokens, права read достаточно
+```
+
+Если какой-то из четырёх датасетов (DADS, DroneAudioSet, UrbanSound8K,
+ESC-50 — см. README, раздел «Данные») окажется gated — принять условия на
+странице датасета на HF тем же аккаунтом, которому выписан токен.
+
+---
+
+## Пайплайн с нуля
+
+Нужен `data/manifest.parquet` + `data/clips.bin` (гигабайты, не в git) —
+собираются из четырёх источников HuggingFace скачиванием на диск.
+
+```bash
 python cli/build_manifest.py --limit 1      # один шард на источник, быстрая проверка
 python cli/build_manifest.py                # полная сборка — часы, IO-связано
                                              # чекпоинт по шардам — безопасно Ctrl+C и перезапустить

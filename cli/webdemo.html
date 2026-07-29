@@ -33,8 +33,18 @@
   #status.nodrone { background: #1a3d1a; border-color: #44cc44; }
   #status .prob { font-size: 3rem; margin: 0.3rem 0; }
   #status .sub { font-size: 0.9rem; font-weight: normal; color: #ccc; }
+  #level {
+    width: min(420px, 90vw);
+    height: 10px;
+    background: #222;
+    border-radius: 5px;
+    margin-top: 0.8rem;
+    overflow: hidden;
+  }
+  #level-bar { height: 100%; width: 0%; background: #3a6ea5; transition: width 0.1s linear; }
+  #level-label { font-size: 0.75rem; color: #888; margin-top: 0.2rem; }
   button {
-    margin-top: 1.5rem;
+    margin-top: 1rem;
     padding: 0.8rem 2rem;
     font-size: 1.1rem;
     border-radius: 8px;
@@ -44,32 +54,56 @@
     color: white;
   }
   button.listening { background: #a53a3a; }
+  .row { display: flex; gap: 0.8rem; align-items: center; margin-top: 0.6rem; flex-wrap: wrap; justify-content: center; }
+  #file-section {
+    margin-top: 2rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid #333;
+    width: min(420px, 90vw);
+    text-align: center;
+  }
+  #file-section h2 { font-size: 1rem; color: #9aa; font-weight: normal; }
   #log {
     margin-top: 1.5rem;
     width: min(420px, 90vw);
-    max-height: 200px;
+    max-height: 240px;
     overflow-y: auto;
     font-size: 0.8rem;
     color: #999;
     font-family: monospace;
   }
   #log div { padding: 2px 0; border-bottom: 1px solid #222; }
-  #err { color: #ff8888; margin-top: 1rem; font-size: 0.9rem; }
+  #log div.hi { color: #ff8888; }
+  #err { color: #ff8888; margin-top: 1rem; font-size: 0.9rem; max-width: min(420px, 90vw); text-align: center; }
+  label { font-size: 0.85rem; color: #aaa; }
 </style>
 </head>
 <body>
-  <h1>AirRadar — вердикт DroneNet2 по звуку с микрофона</h1>
+  <h1>AirRadar — вердикт DroneNet2 по звуку</h1>
   <div id="status">
     <div class="prob">—</div>
-    <div class="sub">нажми "Слушать"</div>
+    <div class="sub">нажми "Слушать" или загрузи файл</div>
   </div>
-  <button id="toggle">Слушать</button>
+  <div id="level"><div id="level-bar"></div></div>
+  <div id="level-label">уровень входа (RMS)</div>
+
+  <div class="row">
+    <button id="toggle">Слушать</button>
+    <label><input type="checkbox" id="rawmic"> сырой звук (без подавления шума/АРУ браузера)</label>
+  </div>
+
+  <div id="file-section">
+    <h2>...или проверить готовый файл (без микрофона/колонок — надёжнее для отладки)</h2>
+    <input type="file" id="fileInput" accept="audio/*">
+    <div id="file-progress" style="font-size:0.8rem;color:#888;margin-top:0.4rem;"></div>
+  </div>
+
   <div id="err"></div>
   <div id="log"></div>
 
 <script>
 const CHUNK_SECONDS = 4.0;
-let audioContext, processor, source, stream;
+let audioContext, processor, source, stream, analyser, levelTimer;
 let buffer = [];
 let bufferedSamples = 0;
 let listening = false;
@@ -77,8 +111,12 @@ let busy = false;
 
 const statusEl = document.getElementById('status');
 const toggleBtn = document.getElementById('toggle');
+const rawMicEl = document.getElementById('rawmic');
 const logEl = document.getElementById('log');
 const errEl = document.getElementById('err');
+const levelBar = document.getElementById('level-bar');
+const fileInput = document.getElementById('fileInput');
+const fileProgress = document.getElementById('file-progress');
 
 function floatTo16BitPCM(view, offset, input) {
   for (let i = 0; i < input.length; i++, offset += 2) {
@@ -117,7 +155,13 @@ function mergeBuffers(chunks, total) {
   return out;
 }
 
-function updateUI(data) {
+function rms(samples) {
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+  return Math.sqrt(sum / samples.length);
+}
+
+function updateUI(data, label) {
   const pct = Math.round(data.prob * 100);
   statusEl.querySelector('.prob').textContent = pct + '%';
   statusEl.querySelector('.sub').textContent =
@@ -127,31 +171,30 @@ function updateUI(data) {
 
   const t = new Date().toLocaleTimeString();
   const row = document.createElement('div');
-  row.textContent = `${t}  prob=${data.prob.toFixed(3)}  logit=${data.logit.toFixed(2)}  f0=${data.f0_hat.toFixed(0)}Гц`;
+  if (data.prob >= 0.5) row.classList.add('hi');
+  row.textContent = `${t} ${label || ''} prob=${data.prob.toFixed(3)} logit=${data.logit.toFixed(2)} f0=${data.f0_hat.toFixed(0)}Гц rms_in=${(data.input_rms||0).toFixed(4)}`;
   logEl.prepend(row);
-  while (logEl.children.length > 30) logEl.removeChild(logEl.lastChild);
+  while (logEl.children.length > 60) logEl.removeChild(logEl.lastChild);
 }
 
-async function sendChunk(samples, sampleRate) {
-  if (busy) return;
-  busy = true;
-  try {
-    const blob = encodeWAV(samples, sampleRate);
-    const resp = await fetch('/predict', { method: 'POST', body: blob });
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const data = await resp.json();
-    updateUI(data);
-    errEl.textContent = '';
-  } catch (e) {
-    errEl.textContent = 'ошибка запроса: ' + e.message;
-  } finally {
-    busy = false;
-  }
+async function sendChunk(samples, sampleRate, label) {
+  const blob = encodeWAV(samples, sampleRate);
+  const resp = await fetch('/predict', { method: 'POST', body: blob });
+  if (!resp.ok) throw new Error('HTTP ' + resp.status);
+  const data = await resp.json();
+  data.input_rms = rms(samples);
+  updateUI(data, label);
+  return data;
 }
+
+// ---------- микрофон ----------
 
 async function start() {
+  const constraints = rawMicEl.checked
+    ? { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } }
+    : { audio: true };
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
   } catch (e) {
     errEl.textContent = 'нет доступа к микрофону: ' + e.message;
     return;
@@ -159,6 +202,10 @@ async function start() {
   audioContext = new (window.AudioContext || window.webkitAudioContext)();
   source = audioContext.createMediaStreamSource(stream);
   processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+  analyser = audioContext.createAnalyser();
+  analyser.fftSize = 2048;
+  source.connect(analyser);
 
   // тихий гейн — держит граф обработки "живым" во всех браузерах, но
   // ничего не пускает на колонки (gain=0), без этого эха/фидбека не будет,
@@ -174,17 +221,26 @@ async function start() {
   bufferedSamples = 0;
   const sr = audioContext.sampleRate;
   const targetSamples = Math.round(sr * CHUNK_SECONDS);
+  const timeData = new Float32Array(analyser.fftSize);
+
+  levelTimer = setInterval(() => {
+    analyser.getFloatTimeDomainData(timeData);
+    const level = Math.min(1, rms(timeData) * 8);
+    levelBar.style.width = (level * 100) + '%';
+  }, 100);
 
   processor.onaudioprocess = (e) => {
     if (!listening) return;
     const input = e.inputBuffer.getChannelData(0);
     buffer.push(new Float32Array(input));
     bufferedSamples += input.length;
-    if (bufferedSamples >= targetSamples) {
+    if (bufferedSamples >= targetSamples && !busy) {
       const merged = mergeBuffers(buffer, bufferedSamples);
       buffer = [];
       bufferedSamples = 0;
-      sendChunk(merged, sr);
+      busy = true;
+      sendChunk(merged, sr, '[мик]').catch(err => errEl.textContent = 'ошибка запроса: ' + err.message)
+        .finally(() => busy = false);
     }
   };
 
@@ -192,10 +248,13 @@ async function start() {
   toggleBtn.textContent = 'Остановить';
   toggleBtn.classList.add('listening');
   statusEl.querySelector('.sub').textContent = 'слушаю...';
+  errEl.textContent = '';
 }
 
 function stop() {
   listening = false;
+  if (levelTimer) clearInterval(levelTimer);
+  levelBar.style.width = '0%';
   if (processor) processor.disconnect();
   if (source) source.disconnect();
   if (stream) stream.getTracks().forEach(t => t.stop());
@@ -208,6 +267,45 @@ function stop() {
 
 toggleBtn.onclick = () => {
   if (listening) stop(); else start();
+};
+
+// ---------- загрузка файла (без мик/колонок вообще) ----------
+
+fileInput.onchange = async () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  errEl.textContent = '';
+  fileProgress.textContent = 'декодирую...';
+
+  const arrBuf = await file.arrayBuffer();
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  let audioBuf;
+  try {
+    audioBuf = await ctx.decodeAudioData(arrBuf);
+  } catch (e) {
+    fileProgress.textContent = '';
+    errEl.textContent = 'не смог декодировать файл (нужен аудио-формат, который понимает браузер: wav/mp3/ogg/m4a): ' + e.message;
+    return;
+  }
+
+  const sr = audioBuf.sampleRate;
+  const full = audioBuf.getChannelData(0); // первый канал, моно/левый
+  const chunkLen = Math.round(sr * CHUNK_SECONDS);
+  const nChunks = Math.max(1, Math.floor(full.length / chunkLen));
+
+  fileProgress.textContent = `0/${nChunks} кусков по ${CHUNK_SECONDS}с...`;
+  for (let i = 0; i < nChunks; i++) {
+    const chunk = full.slice(i * chunkLen, (i + 1) * chunkLen);
+    try {
+      await sendChunk(chunk, sr, `[файл ${(i * CHUNK_SECONDS).toFixed(0)}с]`);
+    } catch (e) {
+      errEl.textContent = 'ошибка запроса: ' + e.message;
+      break;
+    }
+    fileProgress.textContent = `${i + 1}/${nChunks} кусков по ${CHUNK_SECONDS}с...`;
+  }
+  fileProgress.textContent = `готово: ${nChunks} кусков обработано`;
+  ctx.close();
 };
 </script>
 </body>

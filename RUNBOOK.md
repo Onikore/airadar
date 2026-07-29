@@ -1,177 +1,170 @@
 # Как запустить
 
-Актуально на состояние проекта — см. [README.md](README.md) (полная история
-находок) и [NEXT_STEPS.md](NEXT_STEPS.md) (план работ по приоритету).
+Актуально на пайплайн второго поколения (`cli/` + `airadar/`, DroneNet2).
+Контекст — [README.md](README.md), приоритеты работ — [NEXT_STEPS.md](NEXT_STEPS.md).
+Легаси-пайплайн первого поколения (`train.py`, `eval.py`, `detect.py`,
+`web.py` в корне) — раздел «Легаси-пайплайн» внизу.
+
+Обучение сейчас идёт **локально на GPU**, не в Colab — данные (`data/manifest.parquet`,
+`data/clips.bin`) и модель помещаются на диск и в память одной рабочей машины.
 
 ---
 
 ## Проверить, что сейчас происходит
 
-```bash
-tail -f logs/train_v2_clean.log      # если идёт обучение DroneNetV2
-ps aux | grep python3                # какие процессы реально живы
-```
-
-Ctrl+C выходит из `tail -f`, само обучение не трогает.
-
-Остановить обучение:
+Windows (PowerShell/Git Bash):
 
 ```bash
-pkill -f "train2\|import train"
+tail -f logs/<run_name>.log            # если обучение запущено с `tee`/перенаправлением в файл
+nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv
+wmic process where "name='python.exe'" get ProcessId,CommandLine   # что именно запущено
+taskkill //PID <pid> //F               # остановить конкретный процесс
 ```
 
----
-
-## Сравнить чекпоинты (DroneNet против DroneNetV2)
-
-Честная метрика — `AUC_fh` (полевые окна против удержанных трудных
-негативов), не recall: recall на записи `drone_video2.wav` часто упирается в
-0.0% и перестаёт различать модели, см. README.
-
-```bash
-python3 -c "
-import numpy as np, torch, train, train2
-from sklearn.metrics import roc_auc_score
-
-Xh, cat, _, hva = train.load_hard()
-Xh = Xh[hva][np.isin(cat[hva], list(train.HARD_CATS))]
-Xf = train.load_field()
-lm = train.LogMel().to(train.DEV)
-
-for path, cls, tag in [('models/dronenet.pt', train.DroneNet, 'DroneNet'),
-                        ('models/dronenet_v2.pt', train2.DroneNetV2, 'DroneNetV2')]:
-    m = cls().to(train.DEV)
-    m.load_state_dict(torch.load(path, map_location=train.DEV, weights_only=False)['model'])
-    m.eval()
-    ph = train._probs(m, lm, Xh)
-    print(f'\n{tag}:')
-    for nm, w in Xf.items():
-        pf = train._probs(m, lm, w)
-        auc = roc_auc_score(np.r_[np.ones(len(pf)), np.zeros(len(ph))], np.r_[pf, ph])
-        print(f'  {nm}: AUC_fh={auc:.4f}  медиана p={np.median(pf):.4f}')
-"
-```
-
-Для доверительных интервалов вместо точечной оценки — `evalx/field_ci.py`
-(список моделей задан константой `MODELS` в начале файла, дополнить при
-необходимости):
-
-```bash
-CUDA_VISIBLE_DEVICES= python3 evalx/field_ci.py
-```
+`cli/train.py` не пишет прогресс построчно внутри эпохи — только одну строку
+по завершении эпохи (`train_loss`, `val_loss`, время, `<- saved`). Тишина в
+логе несколько минут — это нормально, не зависание.
 
 ---
 
 ## Пайплайн с нуля
 
-Нужны `DADS/` (скачивается с HuggingFace, см. README) и
-`DroneAudioDataset/` (старый Kaggle-набор, источник трудных негативов).
+Нужен `data/manifest.parquet` + `data/clips.bin` — собираются из четырёх
+источников HuggingFace (см. README, раздел «Данные»), доступ анонимный (все
+источники публичные).
 
 ```bash
-pip install --break-system-packages soundfile datasets huggingface_hub
+python cli/selfcheck.py                     # вся логика без данных/GPU, 33+ проверки — прогнать первым
 
-hf download geronimobasso/drone-audio-detection-samples \
-    --repo-type dataset --local-dir DADS
+python cli/build_manifest.py --limit 1      # один шард на источник, быстрая проверка
+python cli/build_manifest.py                # полная сборка — часы, IO-связано
+                                             # чекпоинт по шардам — безопасно Ctrl+C и перезапустить
 
-python3 -u prep_dads.py 2>&1 | tee logs/prep_dads.log     # ~15 мин
-python3 -u prep_hard.py 2>&1 | tee logs/prep_hard.log
-python3 -u train.py     2>&1 | tee logs/train.log         # эталон, DroneNet, models/dronenet.pt
-python3 -u train2.py 12                                    # DroneNetV2, models/dronenet_v2.pt
+python cli/manifest_audit.py                # аудит целостности манифеста/clips.bin
+python cli/label_manifest_f0.py             # f0-разметка для вспомогательных голов (не обязательна для обучения)
+```
+
+---
+
+## Обучение
+
+```bash
+python cli/train.py --epochs 15 --bs 32 --run-name my_run \
+    --save-every-epoch --seed 0 --num-workers 4
+```
+
+- `--save-every-epoch` — обязателен, если планируется bench-sweep (см. ниже):
+  без него сохраняется только автовыбранный по `val_loss` "best", а
+  `val_loss` систематически расходится с реальным полевым качеством
+  ([findings](docs/2026-07-29-f0-extension-findings.md)).
+- `--num-workers 4` — без этого случайный доступ к `clips.bin` (гигабайты)
+  упирается в промах кэша страниц ОС, эпоха может идти в разы дольше
+  ([findings](docs/2026-07-26-local-training-findings.md)). На Windows
+  `num_workers>0` требует, чтобы `collate_fn` был picklable (уже так —
+  `functools.partial` над функцией модуля, не лямбда).
+- Резюмирования с чекпоинта нет (`--resume` не реализован). Расписание
+  `OneCycleLR` посчитано под фиксированное число эпох — прервать и
+  доучить нельзя, только новый прогон.
+- Проверить перед долгим прогоном, что GPU не занят другим процессом
+  (`nvidia-smi`) — в частности, забытым `cli/webdemo.py` с загруженной
+  моделью.
+
+---
+
+## Bench — сравнение чекпоинтов на реальных данных
+
+```bash
+python cli/bench.py --model models/my_run_ep008.pt --name my_run_ep008 --arch dronenet2
+# -> bench_out/my_run_ep008.json, bench_out/my_run_ep008.md
+```
+
+`--arch dronenet2` обязателен для новых чекпоинтов (`--arch legacy` — для
+`dronenet.pt`/`dronenet_local.pt` первого поколения).
+
+**Bench-sweep по всем эпохам** (нужен для честного выбора чекпоинта, см.
+выше про `val_loss`):
+
+```bash
+for i in $(seq -w 1 15); do
+  python cli/bench.py --model models/my_run_ep0$i.pt --name my_run_ep0$i --arch dronenet2
+done
+```
+
+Отчёт (`.md`) содержит `auc_fh` по каждой полевой записи и честно сообщает,
+если рабочую точку (порог FA/час) посчитать не удалось — «недостаточно фона»,
+это ожидаемо на текущем корпусе (см. NEXT_STEPS, шаг 3), не баг.
+
+**AUC — не абсолютная уверенность.** Для прямой проверки, перейдёт ли модель
+порог 0.5 (тот, которым `cli/webdemo.html` красит статус), нужен отдельный
+скрипт поверх `DroneNet2Scorer.score()` — в репозитории такого нет, пример
+см. [docs/2026-07-29-f0-extension-findings.md](docs/2026-07-29-f0-extension-findings.md).
+
+---
+
+## Живой тест — веб-демка
+
+```bash
+python cli/webdemo.py --model models/dronenet2_seed0_f0ext_true_best.pt
+# -> http://127.0.0.1:5000
+```
+
+Два режима: микрофон в браузере (Web Audio API, есть переключатель "raw mic" —
+отключает echo cancellation/noise suppression/auto-gain, которые браузер
+включает по умолчанию и которые искажают акустический признак) и загрузка
+файла (обходит микрофон/динамики целиком, точнее для проверки конкретной
+записи).
+
+**Не забывать останавливать процесс после теста** — держит модель на GPU,
+конкурирует за память с параллельным обучением (см. `nvidia-smi` выше).
+
+---
+
+## Диагностика (CPU, можно параллельно с обучением)
+
+```bash
+python cli/diag.py dads-contiguity --shard <N>   # смежность индексов DADS
+python cli/selfcheck.py                          # вся логика пакета
+```
+
+Разведочные скрипты старого пайплайна (`evalx/`) всё ещё работают на новых
+данных частично — `f0_survey.py`, `feat_visibility.py` завязаны на
+конкретные пути `cache_dads`/`cache_hard`, которых больше нет; перед
+использованием проверить актуальность путей.
+
+---
+
+## Легаси-пайплайн (первое поколение, `DroneNet`)
+
+Не активная разработка, но код рабочий — `models/dronenet_local.pt` остаётся
+базовой цифрой сравнения (`bench_out/dronenet_local.json`).
+
+```bash
+python3 -u train.py 2>&1 | tee logs/train.log
 python3 eval.py
+python3 detect.py --file field/drone_video1.wav
+python3 web.py --no-audio
 ```
 
-`train2.py` принимает число эпох первым аргументом (по умолчанию 12) и сам
-подбирает батч под архитектуру — DroneNetV2 требовательнее к памяти
-(inverted bottleneck на полном разрешении), при OOM на другой GPU передать
-свой `bs` через `train.main(..., bs=...)` напрямую.
+Секция «Обучение в Colab» и `notebooks/` из истории проекта — в `archive/`,
+не актуальны: обучение теперь локальное на GPU, Colab не используется.
 
----
-
-## Обучение в Colab
-
-Локально обучать нечем — данных на диске нет, GPU нет. Прогон идёт в Colab,
-кэш и результаты живут в приватном репозитории HF `Onikore/airadar-hub`.
-
-Один раз добавить в Colab секрет `HF_TOKEN` с правом записи: значок ключа
-слева, включить доступ для ноутбука.
-
-```
-notebooks/01_prep.ipynb    сборка кэша из четырёх источников HF, ~30-50 мин, один раз
-notebooks/02_train.ipynb   обучение, кэш тянется за минуты
-```
-
-Ноутбуки клонируют https://github.com/Onikore/airadar.git, поэтому правки
-надо запушить до запуска.
-
-**Обрыв сессии.** Просто запустить ноутбук заново.
-
-- `01_prep` продолжит с недосчитанного шарда (`manifest.json` на HF).
-- `02_train` при `resume=True` подхватит `last.pt` и продолжит с прерванной
-  эпохи, включая состояние оптимизатора, расписания и генераторов случайных
-  чисел — метрики продолжатся побитово, а не с новой траектории.
-
-**Число эпох в начатом прогоне менять нельзя.** `OneCycleLR` задаёт кривую
-скорости обучения на фиксированном горизонте шагов, и возобновление с другим
-числом эпох либо рассыпает расписание, либо ведёт LR не по той кривой. Чтобы
-учить дольше — новое имя `run`.
-
-Читать лог прогона снаружи, без Colab:
+Каждый скрипт легаси-пайплайна — `--selfcheck`:
 
 ```bash
-HF_TOKEN=<токен> python -c "
-import hub, json
-p = hub.pull('runs/dronenet_hf/metrics.jsonl', 'logs/remote.jsonl')
-for l in open(p, encoding='utf-8'):
-    r = json.loads(l)
-    print(r['ep'], r.get('auc_hard'), r.get('rec_field'))
-"
-```
-
-Полевые записи извлекаются из видео отдельным шагом (нужен только при
-добавлении новых записей):
-
-```bash
-pip install imageio-ffmpeg
-python prep_field.py          # *.MOV / *.mp4 в корне -> field/drone_video*.wav
-```
-
----
-
-## Живой детектор
-
-```bash
-python3 detect.py                       # микрофон по умолчанию, консоль
-python3 detect.py --device plughw:1,6   # конкретный вход, см. `arecord -l`
-python3 detect.py --file field/drone_video.wav   # прогон готовой записи
-
-python3 web.py                          # http://127.0.0.1:8000, живое обнаружение
-python3 web.py --no-audio               # только прогресс обучения, без микрофона
-```
-
-Калибровочные ручки (`--threshold`, `--k`, `--m`) — отправная точка, на
-реальной точке подбираются по месту.
-
----
-
-## Диагностика (не требует GPU, можно параллельно с обучением)
-
-```bash
-python3 diag_leak.py       # дубликаты, ближайший сосед, тривиальный baseline
-python3 diag_hard.py       # пересечение cache_hard с обучающей выборкой
-python3 diag_compare.py    # CNN против baseline при одинаковом recall
-python3 spectrum.py        # спектрограммы field/*.wav, поиск гребёнки
-```
-
-Каждый скрипт проекта — `--selfcheck`:
-
-```bash
-for f in train.py train2.py eval.py detect.py web.py spectrum.py \
-         prep_dads.py prep_hard.py prep_field.py \
-         hub.py hf_sources.py prep_hf.py; do
+for f in train.py eval.py detect.py web.py spectrum.py \
+         diag_leak.py diag_hard.py diag_compare.py hub.py prep_hf.py; do
     python3 "$f" --selfcheck
 done
 ```
 
-Все проходят без данных и без GPU: нужны `numpy`, `scipy`, `soundfile`,
-`sklearn`, `pyarrow`, `huggingface_hub` и CPU-сборка torch (см. README,
-раздел «Машина без GPU»).
+---
+
+## Окружение
+
+Обучение — локальный GPU (RTX-класс, 12ГБ). CPU-режим для проверки кода без
+карты: `torch.cuda.is_available()` в `airadar/train/loop.py` сам падает на
+`cpu`, `cli/selfcheck.py` проходит без данных и без GPU.
+
+`data/clips.bin` — гигабайты, случайный доступ; узкое место — не вычисления
+на GPU, а промах кэша страниц ОС на большом файле (решается
+`num_workers`, см. выше).
